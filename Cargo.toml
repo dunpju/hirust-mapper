@@ -1,0 +1,12 @@
+[package]
+name = "hirust-mapper"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+log = "0.4.28"
+regex = "1.11.2"
+lazy_static = "1.5.0"
+xml = "0.8.20"
+quick-xml = "0.28"
+thiserror = "1.0"
