@@ -1,6 +1,7 @@
 use log::warn;
 use regex::Regex;
 use std::process;
+use crate::DynamicSqlNode;
 
 pub enum DialectType {
     Oracle,
@@ -108,6 +109,8 @@ pub struct XmlParsedState {
 
     /// 文件名
     pub filename: String,
+    pub sql_builder_stack: Vec<String>,
+    pub dynamic_nodes: Vec<DynamicSqlNode>
 }
 
 impl XmlParsedState {
@@ -130,6 +133,8 @@ impl XmlParsedState {
             },
             statements: Vec::new(),
             filename: String::from(""),
+            sql_builder_stack: Vec::new(),
+            dynamic_nodes: Vec::new(),
         }
     }
 

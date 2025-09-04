@@ -86,15 +86,15 @@ pub fn match_statement(element_name: &String) -> bool {
 }
 
 #[derive(Debug)]
-struct KeyValue {
-    key: String,
-    condition: String,
-    value: String,
+pub(crate) struct KeyValue {
+    pub key: String,
+    pub condition: String,
+    pub value: String,
 }
 
 impl KeyValue {
     /// 解析条件表达式为KeyValue向量
-    fn parse_conditions(expr: &str) -> Result<Vec<Self>, String> {
+    pub fn parse_conditions(expr: &str) -> Result<Vec<Self>, String> {
         let mut conditions = Vec::new();
         // 按'and'分割多个条件
         for cond in expr.split(" and ") {

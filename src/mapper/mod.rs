@@ -3,6 +3,7 @@ pub mod model;
 pub mod mybatis_parser;
 pub mod parse_helper;
 pub mod def;
+pub mod sql_generator;
 
 pub use parser::*;
 pub use model::*;
