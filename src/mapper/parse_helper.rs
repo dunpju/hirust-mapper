@@ -84,3 +84,49 @@ pub fn match_statement(element_name: &String) -> bool {
         || *element_name == "delete"
         || *element_name == "sql"
 }
+
+#[derive(Debug)]
+struct KeyValue {
+    key: String,
+    condition: String,
+    value: String,
+}
+
+impl KeyValue {
+    /// 解析条件表达式为KeyValue向量
+    fn parse_conditions(expr: &str) -> Result<Vec<Self>, String> {
+        let mut conditions = Vec::new();
+        // 按'and'分割多个条件
+        for cond in expr.split(" and ") {
+            let trimmed = cond.trim();
+            // 使用正则表达式匹配key、condition和value
+            let re = regex::Regex::new(r"^\s*([\w\.\(\)]+)\s*([!=<>]+)\s*(.+?)\s*$")
+                .map_err(|e| format!("正则表达式编译失败: {}", e))?;
+
+            let caps = re.captures(trimmed)
+                .ok_or_else(|| format!("无效的条件格式: {}", trimmed))?;
+
+            conditions.push(KeyValue {
+                key: caps[1].to_string(),
+                condition: caps[2].to_string(),
+                value: caps[3].to_string(),
+            });
+        }
+        Ok(conditions)
+    }
+}
+
+// 使用示例
+fn example_usage() {
+    let expr = "schoolIdList != null and schoolIdList.size() > 0";
+    match KeyValue::parse_conditions(expr) {
+        Ok(kvs) => {
+            println!("解析结果: {:?}", kvs);
+            // 输出: [
+            //   KeyValue { key: "schoolIdList", condition: "!=", value: "null" },
+            //   KeyValue { key: "schoolIdList.size()", condition: ">", value: "0" }
+            // ]
+        },
+        Err(e) => eprintln!("解析错误: {}", e)
+    }
+}
