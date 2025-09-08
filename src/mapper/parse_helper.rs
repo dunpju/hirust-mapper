@@ -115,18 +115,3 @@ impl KeyValue {
         Ok(conditions)
     }
 }
-
-// 使用示例
-fn example_usage() {
-    let expr = "schoolIdList != null and schoolIdList.size() > 0";
-    match KeyValue::parse_conditions(expr) {
-        Ok(kvs) => {
-            println!("解析结果: {:?}", kvs);
-            // 输出: [
-            //   KeyValue { key: "schoolIdList", condition: "!=", value: "null" },
-            //   KeyValue { key: "schoolIdList.size()", condition: ">", value: "0" }
-            // ]
-        },
-        Err(e) => eprintln!("解析错误: {}", e)
-    }
-}
