@@ -1,25 +1,77 @@
 use super::model::DynamicSqlNode;
 use std::collections::HashMap;
+use serde_json::Value;
+
+// 定义参数访问trait
+pub trait ParamsAccess {
+    // 获取单个参数值
+    fn get_param(&self, key: &str) -> Option<&Value>;
+
+    // 获取集合参数
+    fn get_collection(&self, key: &str) -> Option<&Vec<Value>>;
+}
+
+// 为HashMap<String, Value>实现ParamsAccess
+impl ParamsAccess for HashMap<String, Value> {
+    fn get_param(&self, key: &str) -> Option<&Value> {
+        self.get(key)
+    }
+
+    fn get_collection(&self, key: &str) -> Option<&Vec<Value>> {
+        // 尝试从数组类型的值中获取集合
+        if let Some(Value::Array(arr)) = self.get(key) {
+            Some(arr)
+        } else {
+            None
+        }
+    }
+}
+
+// 为HashMap<String, Vec<Value>>实现ParamsAccess
+impl ParamsAccess for HashMap<String, Vec<Value>> {
+    fn get_param(&self, _key: &str) -> Option<&Value> {
+        // 对于这种类型，默认不支持单个参数访问
+        None
+    }
+
+    fn get_collection(&self, key: &str) -> Option<&Vec<Value>> {
+        self.get(key)
+    }
+}
 
 // 辅助函数：拼接节点内容并添加适当的空格
-fn join_with_spaces(nodes: &[DynamicSqlNode], params: &HashMap<String, serde_json::Value>) -> String {
+fn join_with_spaces<P: ParamsAccess>(nodes: &[DynamicSqlNode], params: &P) -> String {
     let parts: Vec<String> = nodes.iter()
         .map(|n| generate_sql(n, params))
         .filter(|s| !s.trim().is_empty())  // 过滤掉空字符串
-        .map(|s|
+        .map(|s| {
             // 替换换行符为空格，并将连续的多个空格合并为一个
             s.replace('\n', " ")
-            .replace('\r', "")
-            .split_whitespace()
-            .collect::<Vec<&str>>()
-            .join(" "))
+                .replace('\r', "")
+                .split_whitespace()
+                .collect::<Vec<&str>>()
+                .join(" ")
+        })
         .collect();
 
     // 对非空部分添加空格连接
     parts.join(" ")
 }
 
-pub fn generate_sql(node: &DynamicSqlNode, params: &HashMap<String, serde_json::Value>) -> String {
+// 生成临时参数的辅助函数
+fn create_temp_params(item: &str, item_value: &Value, index: &Option<String>, index_value: usize) -> HashMap<String, Value> {
+    let mut temp_params = HashMap::new();
+    temp_params.insert(item.to_string(), item_value.clone());
+
+    if let Some(index_name) = index {
+        temp_params.insert(index_name.clone(), Value::Number(index_value.into()));
+    }
+
+    temp_params
+}
+
+// 泛型版本的generate_sql函数
+pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P) -> String {
     match node {
         DynamicSqlNode::Text(content) => content.clone(),
         DynamicSqlNode::If { test, contents } => {
@@ -30,39 +82,60 @@ pub fn generate_sql(node: &DynamicSqlNode, params: &HashMap<String, serde_json::
             }
         },
         DynamicSqlNode::Foreach { collection, item, index, open, separator, close, contents } => {
-            // 实现foreach逻辑
-            match params.get(collection) {
-                Some(serde_json::Value::Array(items)) => {
-                    if items.is_empty() {
-                        return String::new();
+            // 实现foreach逻辑，同时支持两种参数类型
+            if let Some(items) = params.get_collection(collection) {
+                if items.is_empty() {
+                    return String::new();
+                }
+
+                let mut result = open.clone();
+                let mut is_first = true;
+
+                for (i, item_value) in items.iter().enumerate() {
+                    if !is_first {
+                        result.push_str(separator);
                     }
+                    is_first = false;
 
-                    let mut result = open.clone();
-                    let mut is_first = true;
+                    // 创建临时参数
+                    let temp_params = create_temp_params(item, item_value, index, i);
 
-                    for (i, item_value) in items.iter().enumerate() {
-                        if !is_first {
-                            result.push_str(separator);
-                        }
-                        is_first = false;
+                    // 生成子节点SQL
+                    let item_sql = join_with_spaces(contents, &temp_params);
+                    result.push_str(&item_sql);
+                }
 
-                        // 临时参数，用于替换item和index
-                        let mut temp_params = params.clone();
-                        temp_params.insert(item.clone(), item_value.clone());
+                result.push_str(close);
+                return result;
+            }
 
-                        if let Some(index_name) = index {
-                            temp_params.insert(index_name.clone(), serde_json::Value::Number(i.into()));
-                        }
+            // 尝试从单个值类型参数获取（兼容旧版本）
+            if let Some(Value::Array(items)) = params.get_param(collection) {
+                if items.is_empty() {
+                    return String::new();
+                }
 
-                        // 生成子节点SQL
-                        let item_sql = join_with_spaces(contents, &temp_params);
-                        result.push_str(&item_sql);
+                let mut result = open.clone();
+                let mut is_first = true;
+
+                for (i, item_value) in items.iter().enumerate() {
+                    if !is_first {
+                        result.push_str(separator);
                     }
+                    is_first = false;
 
-                    result.push_str(close);
-                    result
-                },
-                _ => String::new()
+                    // 创建临时参数
+                    let temp_params = create_temp_params(item, item_value, index, i);
+
+                    // 生成子节点SQL
+                    let item_sql = join_with_spaces(contents, &temp_params);
+                    result.push_str(&item_sql);
+                }
+
+                result.push_str(close);
+                result
+            } else {
+                String::new()
             }
         },
         DynamicSqlNode::Trim { prefix, prefix_overrides, suffix, suffix_overrides, contents } => {
@@ -131,19 +204,19 @@ pub fn generate_sql(node: &DynamicSqlNode, params: &HashMap<String, serde_json::
         },
         DynamicSqlNode::Bind { name:_, value: _value } => {
             // Bind节点只是绑定变量，不生成SQL
-            // 在实际应用中，这里应该将绑定的值添加到参数中
             String::new()
         },
     }
 }
 
-fn evaluate_condition(condition: &str, params: &HashMap<String, serde_json::Value>) -> bool {
-    // 使用parse_helper中的KeyValue解析条件
+// 泛型版本的evaluate_condition函数
+fn evaluate_condition<P: ParamsAccess>(condition: &str, params: &P) -> bool {
+    // 使用parser中的KeyValue解析条件
     let kvs = super::parser::KeyValue::parse_conditions(condition).unwrap_or_default();
 
     // 检查所有条件是否都满足
     kvs.iter().all(|kv| {
-        match params.get(&kv.key) {
+        match params.get_param(&kv.key) {
             Some(value) => {
                 // 处理各种比较操作符
                 match kv.condition.as_str() {
@@ -152,11 +225,11 @@ fn evaluate_condition(condition: &str, params: &HashMap<String, serde_json::Valu
                             return false; // 不等于null
                         } else if kv.value.starts_with('\'') && kv.value.ends_with('\'') {
                             let str_value = kv.value.trim_matches('\'');
-                            if let serde_json::Value::String(s) = value {
+                            if let Value::String(s) = value {
                                 return s == str_value;
                             }
                         } else if let Ok(num_value) = kv.value.parse::<i64>() {
-                            if let serde_json::Value::Number(n) = value {
+                            if let Value::Number(n) = value {
                                 if let Some(n_int) = n.as_i64() {
                                     return n_int == num_value;
                                 }
@@ -169,11 +242,11 @@ fn evaluate_condition(condition: &str, params: &HashMap<String, serde_json::Valu
                             return true; // 不为null
                         } else if kv.value.starts_with('\'') && kv.value.ends_with('\'') {
                             let str_value = kv.value.trim_matches('\'');
-                            if let serde_json::Value::String(s) = value {
+                            if let Value::String(s) = value {
                                 return s != str_value;
                             }
                         } else if let Ok(num_value) = kv.value.parse::<i64>() {
-                            if let serde_json::Value::Number(n) = value {
+                            if let Value::Number(n) = value {
                                 if let Some(n_int) = n.as_i64() {
                                     return n_int != num_value;
                                 }
@@ -183,7 +256,7 @@ fn evaluate_condition(condition: &str, params: &HashMap<String, serde_json::Valu
                     },
                     ">" => {
                         if let Ok(num_value) = kv.value.parse::<i64>() {
-                            if let serde_json::Value::Number(n) = value {
+                            if let Value::Number(n) = value {
                                 if let Some(n_int) = n.as_i64() {
                                     return n_int > num_value;
                                 }
@@ -193,7 +266,7 @@ fn evaluate_condition(condition: &str, params: &HashMap<String, serde_json::Valu
                     },
                     "<" => {
                         if let Ok(num_value) = kv.value.parse::<i64>() {
-                            if let serde_json::Value::Number(n) = value {
+                            if let Value::Number(n) = value {
                                 if let Some(n_int) = n.as_i64() {
                                     return n_int < num_value;
                                 }
@@ -203,7 +276,7 @@ fn evaluate_condition(condition: &str, params: &HashMap<String, serde_json::Valu
                     },
                     ">=" => {
                         if let Ok(num_value) = kv.value.parse::<i64>() {
-                            if let serde_json::Value::Number(n) = value {
+                            if let Value::Number(n) = value {
                                 if let Some(n_int) = n.as_i64() {
                                     return n_int >= num_value;
                                 }
@@ -213,7 +286,7 @@ fn evaluate_condition(condition: &str, params: &HashMap<String, serde_json::Valu
                     },
                     "<=" => {
                         if let Ok(num_value) = kv.value.parse::<i64>() {
-                            if let serde_json::Value::Number(n) = value {
+                            if let Value::Number(n) = value {
                                 if let Some(n_int) = n.as_i64() {
                                     return n_int <= num_value;
                                 }
@@ -226,7 +299,7 @@ fn evaluate_condition(condition: &str, params: &HashMap<String, serde_json::Valu
             },
             None => {
                 // 参数不存在，检查是否是与null的比较
-                // 修正逻辑：参数不存在时，参数 == null 条件返回true，其他条件返回false
+                // 参数不存在时，参数 == null 条件返回true，其他条件返回false
                 kv.condition == "=" && kv.value == "null"
             }
         }
