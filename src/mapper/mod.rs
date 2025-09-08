@@ -1,6 +1,5 @@
 pub mod parser;
 pub mod model;
-pub mod def;
 pub mod sql_generator;
 
 pub use parser::*;
