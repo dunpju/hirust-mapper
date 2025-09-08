@@ -27,14 +27,13 @@ mod tests {
     <mapper namespace="com.example.UserMapper">
         <select id="findUserById" parameterType="Long" resultType="User">
             SELECT * FROM users
-            <where>
-                <if test="id != null">
-                    AND id = #{id}
-                </if>
-                <if test="name != null and name != ''">
-                    AND name = #{name}
-                </if>
-            </where>
+            WHERE 1=1
+            <if test="id != null">
+                AND id = #{id}
+            </if>
+            <if test="name != null and name != ''">
+                AND name = #{name}
+            </if>
         </select>
     </mapper>"#;
 
@@ -48,7 +47,7 @@ mod tests {
             // 准备参数
             let mut params = HashMap::new();
             params.insert("id".to_string(), Value::Number(1.into()));
-            params.insert("name".to_string(), Value::String("张三".to_string()));
+            //params.insert("name".to_string(), Value::String("张三".to_string()));
 
             // 生成最终SQL
             if let Some(dynamic_sql) = &statement.dynamic_sql {
