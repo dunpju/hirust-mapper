@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex};
 use xml::{attribute::OwnedAttribute, name::OwnedName, EventReader};
 use xml::reader::XmlEvent;
 use crate::def::{Mode, SqlKey, SqlStatement};
-use crate::DynamicSqlNode;
 use crate::parse_helper::{match_statement, replace_included_sql, search_matched_attr};
 
 lazy_static! {
@@ -652,25 +651,10 @@ fn replace_included_sql_by_key(
     }
 }
 
-
-fn comment_leading(dialet_type: &DialectType) -> String {
-    match dialet_type {
-        DialectType::Oracle => "SELECT \"XML-FILE: ".to_string(),
-        DialectType::MySQL => "SELECT \"XML-FILE: ".to_string(),
-    }
-}
-
 fn comment_leading2(dialet_type: &DialectType) -> String {
     match dialet_type {
         DialectType::Oracle => "SELECT \"STAT-ID: ".to_string(),
         DialectType::MySQL => "SELECT \"STAT-ID: ".to_string(),
-    }
-}
-
-fn comment_tailing(dialet_type: &DialectType) -> String {
-    match dialet_type {
-        DialectType::Oracle => "\" AS XML_FILE FROM DUAL;".to_string(),
-        DialectType::MySQL => "\" AS XML_FILE;".to_string(),
     }
 }
 
@@ -691,31 +675,3 @@ fn explain_dialect(dialect_type: &DialectType) -> &str {
         DialectType::MySQL => "explain ",
     }
 }
-
-// ... existing code ...
-fn parse_start_element(
-    name: OwnedName,
-    attributes: Vec<OwnedAttribute>,
-    state: &mut XmlParsedState,
-) {
-    let element_name = name.local_name.as_str().to_ascii_lowercase();
-    if element_name == "mapper" || element_name == "sqlmap" {
-        // ... existing code ...
-    } else if element_name == "if" {
-        // 解析if标签的test属性
-        let mut test_condition = String::new();
-        search_matched_attr(&attributes, "test", |attr| {
-            test_condition = attr.value.clone();
-        });
-        // 创建If节点并暂存当前sql_builder状态
-        state.dynamic_nodes.push(DynamicSqlNode::If {
-            test: test_condition,
-            contents: Vec::new(),
-        });
-        state.sql_builder_stack.push(state.sql_builder.clone());
-        state.sql_builder.clear();
-    } else {
-        // ... existing code ...
-    }
-}
-// ... existing code ...

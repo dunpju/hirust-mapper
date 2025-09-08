@@ -1,14 +1,23 @@
 use super::model::DynamicSqlNode;
 use std::collections::HashMap;
 
+// 辅助函数：拼接节点内容并添加适当的空格
+fn join_with_spaces(nodes: &[DynamicSqlNode], params: &HashMap<String, serde_json::Value>) -> String {
+    let parts: Vec<String> = nodes.iter()
+        .map(|n| generate_sql(n, params))
+        .filter(|s| !s.trim().is_empty())  // 过滤掉空字符串
+        .collect();
+
+    // 对非空部分添加空格连接
+    parts.join(" ")
+}
+
 pub fn generate_sql(node: &DynamicSqlNode, params: &HashMap<String, serde_json::Value>) -> String {
     match node {
         DynamicSqlNode::Text(content) => content.clone(),
         DynamicSqlNode::If { test, contents } => {
             if evaluate_condition(test, params) {
-                contents.iter()
-                    .map(|n| generate_sql(n, params))
-                    .collect()
+                join_with_spaces(contents, params)
             } else {
                 String::new()
             }
@@ -39,9 +48,7 @@ pub fn generate_sql(node: &DynamicSqlNode, params: &HashMap<String, serde_json::
                         }
 
                         // 生成子节点SQL
-                        let item_sql: String = contents.iter()
-                            .map(|n| generate_sql(n, &temp_params))
-                            .collect();
+                        let item_sql = join_with_spaces(contents, &temp_params);
                         result.push_str(&item_sql);
                     }
 
@@ -52,9 +59,7 @@ pub fn generate_sql(node: &DynamicSqlNode, params: &HashMap<String, serde_json::
             }
         },
         DynamicSqlNode::Trim { prefix, prefix_overrides, suffix, suffix_overrides, contents } => {
-            let mut sql = contents.iter()
-                .map(|n| generate_sql(n, params))
-                .collect::<String>();
+            let mut sql = join_with_spaces(contents, params);
 
             // 处理prefix_overrides
             if let Some(overrides) = prefix_overrides {
@@ -79,14 +84,24 @@ pub fn generate_sql(node: &DynamicSqlNode, params: &HashMap<String, serde_json::
             // 处理prefix
             if let Some(p) = prefix {
                 if !sql.is_empty() {
-                    sql = format!("{}{}", p, sql);
+                    // 确保prefix和sql之间有空格
+                    sql = format!("{}{}{}",
+                                  p.trim_end(),
+                                  if !p.trim_end().is_empty() && !sql.trim_start().is_empty() { " " } else { "" },
+                                  sql.trim_start()
+                    );
                 }
             }
 
             // 处理suffix
             if let Some(s) = suffix {
                 if !sql.is_empty() {
-                    sql = format!("{}{}", sql, s);
+                    // 确保sql和suffix之间有空格
+                    sql = format!("{}{}{}",
+                                  sql.trim_end(),
+                                  if !sql.trim_end().is_empty() && !s.trim_start().is_empty() { " " } else { "" },
+                                  s.trim_start()
+                    );
                 }
             }
 
@@ -96,27 +111,22 @@ pub fn generate_sql(node: &DynamicSqlNode, params: &HashMap<String, serde_json::
             // 尝试匹配第一个满足条件的when
             for (condition, contents) in whens {
                 if evaluate_condition(condition, params) {
-                    return contents.iter()
-                        .map(|n| generate_sql(n, params))
-                        .collect();
+                    return join_with_spaces(contents, params);
                 }
             }
 
             // 如果没有when条件满足，使用otherwise
             if let Some(contents) = otherwise {
-                contents.iter()
-                    .map(|n| generate_sql(n, params))
-                    .collect()
+                join_with_spaces(contents, params)
             } else {
                 String::new()
             }
         },
-        DynamicSqlNode::Bind { name, value } => {
+        DynamicSqlNode::Bind { name:_, value: _value } => {
             // Bind节点只是绑定变量，不生成SQL
             // 在实际应用中，这里应该将绑定的值添加到参数中
             String::new()
         },
-        _ => String::new()
     }
 }
 
