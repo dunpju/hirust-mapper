@@ -226,7 +226,8 @@ fn evaluate_condition(condition: &str, params: &HashMap<String, serde_json::Valu
             },
             None => {
                 // 参数不存在，检查是否是与null的比较
-                kv.condition == "!=" && kv.value == "null"
+                // 修正逻辑：参数不存在时，参数 == null 条件返回true，其他条件返回false
+                kv.condition == "=" && kv.value == "null"
             }
         }
     })
