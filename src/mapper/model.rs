@@ -9,6 +9,8 @@ pub struct Mapper {
     pub statements: HashMap<String, SqlStatement>,
     /// 结果映射
     pub result_maps: HashMap<String, ResultMap>,
+    /// SQL片段映射
+    pub sql_fragments: HashMap<String, Vec<DynamicSqlNode>>,
 }
 
 /// SQL语句类型
@@ -96,5 +98,8 @@ pub enum DynamicSqlNode {
     Bind {
         name: String,
         value: String,
+    },
+    Include {
+        ref_id: String,
     },
 }

@@ -1,6 +1,7 @@
 use super::model::DynamicSqlNode;
 use std::collections::HashMap;
 use serde_json::Value;
+use crate::Mapper;
 
 // 定义参数访问trait
 pub trait ParamsAccess {
@@ -39,10 +40,15 @@ impl ParamsAccess for HashMap<String, Vec<Value>> {
     }
 }
 
-// 辅助函数：拼接节点内容并添加适当的空格
-fn join_with_spaces<P: ParamsAccess>(nodes: &[DynamicSqlNode], params: &P) -> String {
+// 修改join_with_spaces辅助函数
+fn join_with_spaces<P: ParamsAccess>(nodes: &[DynamicSqlNode], params: &P, mapper: &Mapper) -> String {
     let parts: Vec<String> = nodes.iter()
-        .map(|n| generate_sql(n, params))
+        .map(|n| {
+            let sql = generate_sql(n, params, mapper);
+            // 添加调试信息
+            println!("节点类型: {:?}, 生成的SQL: {}", n, sql);
+            sql
+        })
         .filter(|s| !s.trim().is_empty())  // 过滤掉空字符串
         .map(|s| {
             // 替换换行符为空格，并将连续的多个空格合并为一个
@@ -71,12 +77,12 @@ fn create_temp_params(item: &str, item_value: &Value, index: &Option<String>, in
 }
 
 // 泛型版本的generate_sql函数
-pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P) -> String {
+pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P, mapper: &Mapper) -> String {
     match node {
         DynamicSqlNode::Text(content) => content.clone(),
         DynamicSqlNode::If { test, contents } => {
             if evaluate_condition(test, params) {
-                join_with_spaces(contents, params)
+                join_with_spaces(contents, params, mapper)
             } else {
                 String::new()
             }
@@ -101,7 +107,7 @@ pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P) -> Strin
                     let temp_params = create_temp_params(item, item_value, index, i);
 
                     // 生成子节点SQL
-                    let item_sql = join_with_spaces(contents, &temp_params);
+                    let item_sql = join_with_spaces(contents, &temp_params, mapper);
                     result.push_str(&item_sql);
                 }
 
@@ -128,7 +134,7 @@ pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P) -> Strin
                     let temp_params = create_temp_params(item, item_value, index, i);
 
                     // 生成子节点SQL
-                    let item_sql = join_with_spaces(contents, &temp_params);
+                    let item_sql = join_with_spaces(contents, &temp_params, mapper);
                     result.push_str(&item_sql);
                 }
 
@@ -139,7 +145,7 @@ pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P) -> Strin
             }
         },
         DynamicSqlNode::Trim { prefix, prefix_overrides, suffix, suffix_overrides, contents } => {
-            let mut sql = join_with_spaces(contents, params);
+            let mut sql = join_with_spaces(contents, params, mapper);
 
             // 处理prefix_overrides
             if let Some(overrides) = prefix_overrides {
@@ -191,13 +197,13 @@ pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P) -> Strin
             // 尝试匹配第一个满足条件的when
             for (condition, contents) in whens {
                 if evaluate_condition(condition, params) {
-                    return join_with_spaces(contents, params);
+                    return join_with_spaces(contents, params, mapper);
                 }
             }
 
             // 如果没有when条件满足，使用otherwise
             if let Some(contents) = otherwise {
-                join_with_spaces(contents, params)
+                join_with_spaces(contents, params, mapper)
             } else {
                 String::new()
             }
@@ -205,6 +211,35 @@ pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P) -> Strin
         DynamicSqlNode::Bind { name:_, value: _value } => {
             // Bind节点只是绑定变量，不生成SQL
             String::new()
+        },
+        DynamicSqlNode::Include { ref_id } => {
+            // 添加调试信息
+            println!("处理Include标签，ref_id: {}, sql_fragments: {:?}",
+                     ref_id, mapper.sql_fragments.keys());
+
+            // 查找对应的SQL片段
+            if let Some(fragment) = mapper.sql_fragments.get(ref_id) {
+                println!("找到SQL片段，内容: {:?}", fragment);
+
+                // 直接处理SQL片段中的Text节点
+                let result: String = fragment.iter()
+                    .filter_map(|node| match node {
+                        DynamicSqlNode::Text(text) => Some(text.clone()),
+                        _ => {
+                            // 对于非Text节点，使用generate_sql处理
+                            let sql = generate_sql(node, params, mapper);
+                            if !sql.trim().is_empty() { Some(sql) } else { None }
+                        }
+                    })
+                    .collect::<Vec<String>>()
+                    .join(" ");
+
+                println!("处理后的SQL片段结果: {}", result);
+                result
+            } else {
+                println!("警告：未找到SQL片段: {}", ref_id);
+                String::new()
+            }
         },
     }
 }

@@ -74,6 +74,19 @@ impl MyBatisXmlParser {
                         let result_map = self.parse_result_map(&e)?;
                         mapper.result_maps.insert(result_map.id.clone(), result_map);
                     },
+                    b"sql" if in_mapper => {
+                        let e = e.into_owned();
+                        let sql_id = e.attributes().find(|a| {
+                            a.as_ref().unwrap().key.as_ref() == b"id"
+                        }).ok_or("sql标签缺少id属性")?.unwrap();
+                        let id = std::str::from_utf8(&sql_id.value)?.to_string();
+
+                        let mut contents = Vec::new();
+                        self.parse_sql_content(&mut String::new(), &mut contents)?;
+                        // 添加调试信息
+                        println!("解析SQL片段: {}, 内容: {:?}", id, contents);
+                        mapper.sql_fragments.insert(id, contents);
+                    },
                     _ => {}
                 },
                 Ok(Event::End(e)) => {
@@ -156,6 +169,19 @@ impl MyBatisXmlParser {
                             test,
                             contents,
                         });
+                    },
+                    b"include" => {
+                        let ref_id_attr = e.attributes().find(|a| {
+                            a.as_ref().unwrap().key.as_ref() == b"refid"
+                        }).ok_or("include标签缺少refid属性")?;
+                        let ref_id = std::str::from_utf8(&ref_id_attr.unwrap().value)?.to_string();
+
+                        dynamic_nodes.push(DynamicSqlNode::Include {
+                            ref_id,
+                        });
+
+                        // 跳过include标签的结束标签
+                        self.reader.read_event_into(&mut self.buf)?;
                     },
                     b"foreach" => {
                         // 解析foreach属性

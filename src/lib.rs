@@ -66,7 +66,7 @@ mod tests {
 
             // 生成最终SQL
             if let Some(dynamic_sql) = &statement.dynamic_sql {
-                let sql = generate_sql(dynamic_sql, &params);
+                let sql = generate_sql(dynamic_sql, &params, &mapper);
                 println!("生成的SQL: {}", sql);
             }
         }
@@ -80,18 +80,23 @@ mod tests {
 
             // 生成最终SQL
             if let Some(dynamic_sql) = &statement.dynamic_sql {
-                let sql = generate_sql(dynamic_sql, &params);
+                let sql = generate_sql(dynamic_sql, &params, &mapper);
                 println!("生成的SQL: {}", sql);
             }
         }
         // 获取SQL语句
         if let Some(statement) = mapper.statements.get("select0") {
+            // 添加调试信息
+            println!("select0语句: {:?}", statement);
+            println!("SQL片段列表: {:?}", mapper.sql_fragments.keys());
+
             // 准备参数
             let params: HashMap<String, Vec<Value>> = HashMap::new();
 
             // 生成最终SQL
             if let Some(dynamic_sql) = &statement.dynamic_sql {
-                let sql = generate_sql(dynamic_sql, &params);
+                println!("dynamic_sql内容: {:?}", dynamic_sql);
+                let sql = generate_sql(dynamic_sql, &params, &mapper);
                 println!("生成的SQL: {}", sql);
             }
         }
