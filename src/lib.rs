@@ -41,6 +41,13 @@ mod tests {
             #{item}
         </foreach>
     </select>
+    <sql id="sql1">
+        select a,b,c,d,e,f,g
+    </sql>
+    <select id="select0">
+        <include refid="sql1" />
+        from tab1
+    </select>
     </mapper>"#;
 
         // let xml_content = include_str!("../privilege_project.xml");
@@ -70,6 +77,17 @@ mod tests {
             params.insert("list".to_string(), vec![Value::Number(1.into()),
                                                    Value::Number(2.into()),
                                                    Value::Number(3.into())]);
+
+            // 生成最终SQL
+            if let Some(dynamic_sql) = &statement.dynamic_sql {
+                let sql = generate_sql(dynamic_sql, &params);
+                println!("生成的SQL: {}", sql);
+            }
+        }
+        // 获取SQL语句
+        if let Some(statement) = mapper.statements.get("select0") {
+            // 准备参数
+            let params: HashMap<String, Vec<Value>> = HashMap::new();
 
             // 生成最终SQL
             if let Some(dynamic_sql) = &statement.dynamic_sql {
