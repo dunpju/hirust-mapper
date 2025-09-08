@@ -313,3 +313,35 @@ impl MyBatisXmlParser {
         Ok(())
     }
 }
+
+
+#[derive(Debug)]
+pub(crate) struct KeyValue {
+    pub key: String,
+    pub condition: String,
+    pub value: String,
+}
+
+impl KeyValue {
+    /// 解析条件表达式为KeyValue向量
+    pub fn parse_conditions(expr: &str) -> Result<Vec<Self>, String> {
+        let mut conditions = Vec::new();
+        // 按'and'分割多个条件
+        for cond in expr.split(" and ") {
+            let trimmed = cond.trim();
+            // 使用正则表达式匹配key、condition和value
+            let re = regex::Regex::new(r"^\s*([\w\.\(\)]+)\s*([!=<>]+)\s*(.+?)\s*$")
+                .map_err(|e| format!("正则表达式编译失败: {}", e))?;
+
+            let caps = re.captures(trimmed)
+                .ok_or_else(|| format!("无效的条件格式: {}", trimmed))?;
+
+            conditions.push(KeyValue {
+                key: caps[1].to_string(),
+                condition: caps[2].to_string(),
+                value: caps[3].to_string(),
+            });
+        }
+        Ok(conditions)
+    }
+}

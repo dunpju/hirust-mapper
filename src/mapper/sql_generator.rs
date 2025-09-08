@@ -6,6 +6,13 @@ fn join_with_spaces(nodes: &[DynamicSqlNode], params: &HashMap<String, serde_jso
     let parts: Vec<String> = nodes.iter()
         .map(|n| generate_sql(n, params))
         .filter(|s| !s.trim().is_empty())  // 过滤掉空字符串
+        .map(|s|
+            // 替换换行符为空格，并将连续的多个空格合并为一个
+            s.replace('\n', " ")
+            .replace('\r', "")
+            .split_whitespace()
+            .collect::<Vec<&str>>()
+            .join(" "))
         .collect();
 
     // 对非空部分添加空格连接
@@ -132,7 +139,7 @@ pub fn generate_sql(node: &DynamicSqlNode, params: &HashMap<String, serde_json::
 
 fn evaluate_condition(condition: &str, params: &HashMap<String, serde_json::Value>) -> bool {
     // 使用parse_helper中的KeyValue解析条件
-    let kvs = super::parse_helper::KeyValue::parse_conditions(condition).unwrap_or_default();
+    let kvs = super::parser::KeyValue::parse_conditions(condition).unwrap_or_default();
 
     // 检查所有条件是否都满足
     kvs.iter().all(|kv| {
