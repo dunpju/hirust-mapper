@@ -14,37 +14,37 @@
     </sql>
 
     <sql id="sql_d">
-        <include refid="sql_b"/>
+        <include refid="sql_b"></include>
         ,
-        <include refid="sql_c"/>
+        <include refid="sql_c"></include>
     </sql>
 
     <sql id="sql1">
-        select a,b,c,d,e,f,g
+        select a,b,c,d,e,f,g,hhhh
     </sql>
 
     <sql id="sql2">
-        <include refid="sql1"/>
+        <include refid="sql1"></include>
     </sql>
 
     <sql id="sql3">
-        <include refid="sql2"/>
+        <include refid="sql2"></include>
     </sql>
 
     <sql id="sql4">
-        <include refid="sql3"/>
+        <include refid="sql3"></include>
     </sql>
 
     <sql id="sql5">
-        <include refid="sql4"/>
+        <include refid="sql4"></include>
     </sql>
 
     <sql id="sql6">
-        <include refid="sql5"/>
+        <include refid="sql5"></include>
     </sql>
 
     <select id="select0">
-        <include refid="sql5" />
+        <include refid="sql5"></include>
         from tab1
     </select>
 
@@ -64,9 +64,9 @@
 
     <select id="select1">
         SELECT
-        <include refid="sql_b"/>
+        <include refid="sql_b"></include>
         ,
-        <include refid="sql_c"/>
+        <include refid="sql_c"></include>
         FROM tab1 where column1 in
         <foreach collection="list" index="index" item="item" open="(" separator="," close=")">
             #{item}
@@ -75,7 +75,7 @@
 
     <select id="select11">
         SELECT
-        <include refid="sql_d"/>
+        <include refid="sql_d"></include>
         FROM tab1 where column1 in
         <foreach collection="list" index="index" item="item" open="(" separator="," close=")">
             #{item}
@@ -98,7 +98,7 @@
 
     <select id="select2">
         select column1, column2
-        <include refid="sql_a" />
+        <include refid="sql_a"></include>
         from tab3
         <where>
             <if test="1 == 1">

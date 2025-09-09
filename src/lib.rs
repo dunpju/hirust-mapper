@@ -50,7 +50,7 @@ mod tests {
     </select>
     </mapper>"#;
 
-        // let xml_content = include_str!("../privilege_project.xml");
+        //let xml_content = include_str!("../privilege_project.xml");
 
         // 解析XML
         let mut parser = MyBatisXmlParser::new(xml_content);

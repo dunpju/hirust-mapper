@@ -84,7 +84,7 @@ impl MyBatisXmlParser {
                         let mut contents = Vec::new();
                         self.parse_sql_content(&mut String::new(), &mut contents)?;
                         // 添加调试信息
-                        println!("{}:{} 解析SQL片段: {}, 内容: {:?}", file!(), line!(), id, contents);
+                        //println!("{}:{} 解析SQL片段: {}, 内容: {:?}", file!(), line!(), id, contents);
                         mapper.sql_fragments.insert(id, contents);
                     },
                     _ => {}
