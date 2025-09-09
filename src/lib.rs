@@ -48,6 +48,9 @@ mod tests {
         <include refid="sql1"></include>
         from tab1
     </select>
+    <insert id="insert2">
+        insert into tab2 (ID) values (#{id})
+    </insert>
     </mapper>"#;
 
         //let xml_content = include_str!("../privilege_project.xml");
@@ -93,6 +96,22 @@ mod tests {
 
             // 准备参数
             let params: HashMap<String, Vec<Value>> = HashMap::new();
+
+            // 生成最终SQL
+            if let Some(dynamic_sql) = &statement.dynamic_sql {
+                //println!("dynamic_sql内容: {:?}", dynamic_sql);
+                let sql = generate_sql(dynamic_sql, &params, &mapper);
+                println!("生成的SQL: {}", sql);
+            }
+        }
+        // 获取SQL语句
+        if let Some(statement) = mapper.statements.get("insert2") {
+            // 添加调试信息
+            //println!("SQL片段列表: {:?}", mapper.sql_fragments.keys());
+
+            // 准备参数
+            let mut params: HashMap<String, Value> = HashMap::new();
+            params.insert("id".to_string(), Value::Number(1.into()));
 
             // 生成最终SQL
             if let Some(dynamic_sql) = &statement.dynamic_sql {
