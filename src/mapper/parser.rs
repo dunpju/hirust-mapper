@@ -84,7 +84,7 @@ impl MyBatisXmlParser {
                         let mut contents = Vec::new();
                         self.parse_sql_content(&mut String::new(), &mut contents)?;
                         // 添加调试信息
-                        println!("解析SQL片段: {}, 内容: {:?}", id, contents);
+                        println!("{}:{} 解析SQL片段: {}, 内容: {:?}", file!(), line!(), id, contents);
                         mapper.sql_fragments.insert(id, contents);
                     },
                     _ => {}
@@ -126,7 +126,11 @@ impl MyBatisXmlParser {
         // 解析SQL内容和动态SQL
         let mut sql_buffer = String::new();
         let mut dynamic_nodes = Vec::new();
+        //println!("{}:{} self.buf:{:?}", file!(), line!(), String::from_utf8_lossy(&self.buf));
+
         self.parse_sql_content(&mut sql_buffer, &mut dynamic_nodes)?;
+
+        //println!("{}:{} dynamic_nodes:{:?}", file!(), line!(), dynamic_nodes);
 
         stmt.sql = sql_buffer;
         if !dynamic_nodes.is_empty() {
@@ -179,7 +183,7 @@ impl MyBatisXmlParser {
                         dynamic_nodes.push(DynamicSqlNode::Include {
                             ref_id,
                         });
-
+                        //println!("{}:{} dynamic_nodes:{:?}", file!(), line!(), dynamic_nodes);
                         // 跳过include标签的结束标签
                         self.reader.read_event_into(&mut self.buf)?;
                     },
@@ -324,16 +328,18 @@ impl MyBatisXmlParser {
         params
     }
 
-    /// 跳过元素
+    // 添加一个辅助方法来跳过元素
     fn skip_element(&mut self) -> Result<(), Box<dyn Error>> {
         let mut depth = 1;
-        while depth > 0 {
-            match self.reader.read_event_into(&mut self.buf) {
-                Ok(Event::Start(_)) => depth += 1,
-                Ok(Event::End(_)) => depth -= 1,
-                Ok(Event::Eof) => break,
-                Err(e) => return Err(Box::new(e)),
-                _ => {}
+        loop {
+            match self.reader.read_event_into(&mut self.buf)? {
+                Event::Start(_) => depth += 1,
+                Event::End(_) => depth -= 1,
+                Event::Eof => break,
+                _ => {},
+            }
+            if depth == 0 {
+                break;
             }
         }
         Ok(())

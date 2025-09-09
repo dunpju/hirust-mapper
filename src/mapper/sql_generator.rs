@@ -46,7 +46,7 @@ fn join_with_spaces<P: ParamsAccess>(nodes: &[DynamicSqlNode], params: &P, mappe
         .map(|n| {
             let sql = generate_sql(n, params, mapper);
             // 添加调试信息
-            println!("节点类型: {:?}, 生成的SQL: {}", n, sql);
+            //println!("节点类型: {:?}, 生成的SQL: {}", n, sql);
             sql
         })
         .filter(|s| !s.trim().is_empty())  // 过滤掉空字符串
@@ -214,12 +214,11 @@ pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P, mapper: 
         },
         DynamicSqlNode::Include { ref_id } => {
             // 添加调试信息
-            println!("处理Include标签，ref_id: {}, sql_fragments: {:?}",
-                     ref_id, mapper.sql_fragments.keys());
+            //println!("处理Include标签，ref_id: {}, sql_fragments: {:?}", ref_id, mapper.sql_fragments.keys());
 
             // 查找对应的SQL片段
             if let Some(fragment) = mapper.sql_fragments.get(ref_id) {
-                println!("找到SQL片段，内容: {:?}", fragment);
+                //println!("找到SQL片段，内容: {:?}", fragment);
 
                 // 直接处理SQL片段中的Text节点
                 let result: String = fragment.iter()
@@ -234,10 +233,10 @@ pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P, mapper: 
                     .collect::<Vec<String>>()
                     .join(" ");
 
-                println!("处理后的SQL片段结果: {}", result);
+                //println!("处理后的SQL片段结果: {}", result);
                 result
             } else {
-                println!("警告：未找到SQL片段: {}", ref_id);
+                //println!("警告：未找到SQL片段: {}", ref_id);
                 String::new()
             }
         },

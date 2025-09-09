@@ -45,7 +45,7 @@ mod tests {
         select a,b,c,d,e,f,g
     </sql>
     <select id="select0">
-        <include refid="sql1" />
+        <include refid="sql1"></include>
         from tab1
     </select>
     </mapper>"#;
@@ -55,18 +55,19 @@ mod tests {
         // 解析XML
         let mut parser = MyBatisXmlParser::new(xml_content);
         let mapper = parser.parse_mapper().unwrap();
-        println!("解析结果: {:?}", mapper);
+        println!("解析结果: {:?} \n", mapper);
 
         // 获取SQL语句
         if let Some(statement) = mapper.statements.get("findUserById") {
             // 准备参数
-            let mut params = HashMap::new();
-            params.insert("id".to_string(), Value::Number(1.into()));
+            let mut params: HashMap<String, Value> = HashMap::new();
+            //params.insert("id".to_string(), Value::Number(1.into()));
             params.insert("name".to_string(), Value::String("张三".to_string()));
 
             // 生成最终SQL
             if let Some(dynamic_sql) = &statement.dynamic_sql {
                 let sql = generate_sql(dynamic_sql, &params, &mapper);
+                //println!("dynamic_sql内容: {:?}", dynamic_sql);
                 println!("生成的SQL: {}", sql);
             }
         }
@@ -80,6 +81,7 @@ mod tests {
 
             // 生成最终SQL
             if let Some(dynamic_sql) = &statement.dynamic_sql {
+                //println!("dynamic_sql内容: {:?}", dynamic_sql);
                 let sql = generate_sql(dynamic_sql, &params, &mapper);
                 println!("生成的SQL: {}", sql);
             }
@@ -87,15 +89,14 @@ mod tests {
         // 获取SQL语句
         if let Some(statement) = mapper.statements.get("select0") {
             // 添加调试信息
-            println!("select0语句: {:?}", statement);
-            println!("SQL片段列表: {:?}", mapper.sql_fragments.keys());
+            //println!("SQL片段列表: {:?}", mapper.sql_fragments.keys());
 
             // 准备参数
             let params: HashMap<String, Vec<Value>> = HashMap::new();
 
             // 生成最终SQL
             if let Some(dynamic_sql) = &statement.dynamic_sql {
-                println!("dynamic_sql内容: {:?}", dynamic_sql);
+                //println!("dynamic_sql内容: {:?}", dynamic_sql);
                 let sql = generate_sql(dynamic_sql, &params, &mapper);
                 println!("生成的SQL: {}", sql);
             }
