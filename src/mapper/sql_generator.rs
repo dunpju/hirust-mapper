@@ -5,8 +5,10 @@ use crate::Mapper;
 use regex::Regex;
 use lazy_static::lazy_static;
 
+// 在lazy_static块中添加新的正则表达式
 lazy_static! {
     static ref PARAM_REGEX: Regex = Regex::new(r#"#\{([^}]*)\}"#).unwrap();
+    static ref DOLLAR_PARAM_REGEX: Regex = Regex::new(r#"\$\{([^}]*)\}"#).unwrap();
 }
 
 // 定义参数访问trait
@@ -105,9 +107,36 @@ fn join_with_spaces<P: ParamsAccess>(nodes: &[DynamicSqlNode], params: &P, mappe
     result.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 
-// 改进的参数替换函数
+// 改进的参数替换函数，支持两种格式参数
 fn replace_parameters(content: &str, params: &impl ParamsAccess) -> String {
-    PARAM_REGEX.replace_all(content, |caps: &regex::Captures| {
+    // 先处理 ${...} 格式的参数 - 原样替换，不添加单引号
+    let content_with_dollar_params = DOLLAR_PARAM_REGEX.replace_all(content, |caps: &regex::Captures| {
+        let param_path = &caps[1];
+
+        if let Some(value) = params.get_param(param_path) {
+            match value {
+                Value::String(s) => s.to_string(),
+                Value::Number(n) => n.to_string(),
+                Value::Bool(b) => if *b { "1".to_string() } else { "0".to_string() },
+                Value::Null => "NULL".to_string(),
+                _ => {
+                    // 对于其他类型，尝试转换为字符串表示
+                    if let Ok(json_str) = serde_json::to_string(value) {
+                        json_str
+                    } else {
+                        "NULL".to_string()
+                    }
+                }
+            }
+        } else {
+            // 如果参数不存在，输出警告并返回NULL
+            eprintln!("警告: 找不到参数 '{}'", param_path);
+            "NULL".to_string()
+        }
+    }).to_string();
+
+    // 然后处理 #{...} 格式的参数 - 添加单引号包裹
+    PARAM_REGEX.replace_all(&content_with_dollar_params, |caps: &regex::Captures| {
         let param_path = &caps[1];
 
         if let Some(value) = params.get_param(param_path) {
@@ -135,7 +164,6 @@ fn replace_parameters(content: &str, params: &impl ParamsAccess) -> String {
         }
     }).to_string()
 }
-
 
 // 生成临时参数的辅助函数
 fn create_temp_params(item: &str, item_value: &Value, index: &Option<String>, index_value: usize, parent_params: &HashMap<String, Value>) -> HashMap<String, Value> {

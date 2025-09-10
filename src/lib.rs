@@ -272,7 +272,7 @@ mod tests {
             </foreach>
             <choose>
                 <when test="newExamCourse.selectContainCourse != null and newExamCourse.selectContainCourse != ''">
-                    AND C.sysCourseId IN(#{newExamCourse.selectContainCourse})
+                    AND C.sysCourseId IN(${newExamCourse.selectContainCourse})
                 </when>
                 <otherwise>
                     AND C.sysCourseId IN(0)
@@ -302,12 +302,12 @@ mod tests {
             let mut new_exam_course1 = serde_json::Map::new();
             //new_exam_course1.insert("selectContainCourse".to_string(), Value::String("1,2,3".to_string()));
             new_exam_course1.insert("courseIds".to_string(), Value::String("1001".to_string()));
-            new_exam_course1.insert("uniqueKey".to_string(), Value::String("test-key".to_string()));
+            new_exam_course1.insert("uniqueKey".to_string(), Value::String("test-key1".to_string()));
 
             let mut new_exam_course2 = serde_json::Map::new();
-            //new_exam_course2.insert("selectContainCourse".to_string(), Value::String("1,2,3".to_string()));
-            new_exam_course2.insert("courseIds".to_string(), Value::String("1001".to_string()));
-            new_exam_course2.insert("uniqueKey".to_string(), Value::String("test-key".to_string()));
+            new_exam_course2.insert("selectContainCourse".to_string(), Value::String("1,2,3,4".to_string()));
+            new_exam_course2.insert("courseIds".to_string(), Value::String("1002".to_string()));
+            new_exam_course2.insert("uniqueKey".to_string(), Value::String("test-key2".to_string()));
 
             // 将newExamCourse对象添加到newExamCourseList数组中
             let new_exam_course_list = vec![Value::Object(new_exam_course1),
