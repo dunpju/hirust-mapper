@@ -191,17 +191,16 @@ mod tests {
        <update id="batchUpdateCaseWhen">
         UPDATE company
         <set>
-        <trim prefix="`company_name`= CASE company_id" suffix="END,">
-            <foreach collection="companies" item="company">
-                WHEN #{company.companyId} THEN #{company.companyName}
-            </foreach>
-        </trim>
-        <trim prefix="`is_delete` = CASE company_id" suffix="END,">
-            <foreach collection="companies" item="company">
-                WHEN #{company.companyId} THEN #{company.isDelete}
-            </foreach>
-        </trim>
-        </trim>
+            <trim prefix="`company_name`= CASE company_id" suffix="END,">
+                <foreach collection="companies" item="company">
+                    WHEN #{company.companyId} THEN #{company.companyName}
+                </foreach>
+            </trim>
+            <trim prefix="`is_delete` = CASE company_id" suffix="END,">
+                <foreach collection="companies" item="company">
+                    WHEN #{company.companyId} THEN #{company.isDelete}
+                </foreach>
+            </trim>
         </set>
         <where>
             <foreach collection="companies" item="company" separator="AND">
@@ -210,8 +209,6 @@ mod tests {
         </where>
         </update>
     </mapper>"#;
-
-        //let xml_content = include_str!("../privilege_project.xml");
 
         // 解析XML
         let mut parser = MyBatisXmlParser::new(xml_content);
@@ -303,12 +300,12 @@ mod tests {
             let mut params: HashMap<String, Value> = HashMap::new();
             // 创建newExamCourse对象
             let mut new_exam_course1 = serde_json::Map::new();
-            new_exam_course1.insert("selectContainCourse".to_string(), Value::String("1,2,3".to_string()));
+            //new_exam_course1.insert("selectContainCourse".to_string(), Value::String("1,2,3".to_string()));
             new_exam_course1.insert("courseIds".to_string(), Value::String("1001".to_string()));
             new_exam_course1.insert("uniqueKey".to_string(), Value::String("test-key".to_string()));
 
             let mut new_exam_course2 = serde_json::Map::new();
-            new_exam_course2.insert("selectContainCourse".to_string(), Value::String("1,2,3".to_string()));
+            //new_exam_course2.insert("selectContainCourse".to_string(), Value::String("1,2,3".to_string()));
             new_exam_course2.insert("courseIds".to_string(), Value::String("1001".to_string()));
             new_exam_course2.insert("uniqueKey".to_string(), Value::String("test-key".to_string()));
 
