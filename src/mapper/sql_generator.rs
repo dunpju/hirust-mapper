@@ -20,7 +20,33 @@ pub trait ParamsAccess {
 // 为HashMap<String, Value>实现ParamsAccess
 impl ParamsAccess for HashMap<String, Value> {
     fn get_param(&self, key: &str) -> Option<&Value> {
-        self.get(key)
+        // 支持嵌套属性访问，例如 newExamCourse.selectContainCourse
+        if key.contains('.') {
+            let parts: Vec<&str> = key.split('.').collect();
+            // 先检查第一个属性是否存在于顶级参数中
+            if let Some(first_value) = self.get(parts[0]) {
+                let mut current_value = first_value;
+
+                // 从第二个属性开始逐层查找
+                for part in &parts[1..] {
+                    if let Value::Object(map) = current_value {
+                        if let Some(next_value) = map.get(*part) {
+                            current_value = next_value;
+                        } else {
+                            return None; // 属性不存在
+                        }
+                    } else {
+                        return None; // 中间层次不是对象类型
+                    }
+                }
+
+                return Some(current_value);
+            }
+            return None; // 第一个属性不存在
+        } else {
+            // 保持原有的单级属性访问
+            self.get(key)
+        }
     }
 
     fn get_collection(&self, key: &str) -> Option<&Vec<Value>> {
