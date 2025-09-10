@@ -329,4 +329,43 @@ mod tests {
         }
     }
 
+    // cargo test insert_duplicate_key_update -- --show-output
+    #[test]
+    fn insert_duplicate_key_update() {
+        // 示例XML内容
+        let xml_content = r#"<?xml version="1.0" encoding="UTF-8"?>
+    <mapper namespace="com.example.UserMapper">
+       <insert id="insertDuplicateKeyUpdate" useGeneratedKeys="true" keyProperty="bookSchoolId">
+            INSERT INTO book_school (book_id, school_id, is_delete, create_time, update_time) VALUES
+            <foreach collection="entityList" item="entity" separator=",">
+                (#{entity.bookId}, #{entity.schoolId}, 1, NOW(), NOW())
+            </foreach>
+            ON DUPLICATE KEY UPDATE
+            is_delete = values(is_delete),
+            update_time = values(update_time),
+            book_school_id = LAST_INSERT_ID(book_school_id)
+        </insert>
+    </mapper>"#;
+
+        // 解析XML
+        let mut parser = MyBatisXmlParser::new(xml_content);
+        let mapper = parser.parse_mapper().unwrap();
+        println!("解析结果: {:?} \n", mapper);
+
+        // 获取SQL语句
+        if let Some(statement) = mapper.statements.get("insertDuplicateKeyUpdate") {
+            // 添加调试信息
+            //println!("SQL片段列表: {:?}", mapper.sql_fragments.keys());
+
+            // 准备参数
+            let mut params: HashMap<String, Vec<Value>> = HashMap::new();
+            params.insert("entityList".to_string(), vec![Value::Number(1.into()), Value::Number(2.into())]);
+            // 生成最终SQL
+            if let Some(dynamic_sql) = &statement.dynamic_sql {
+                //println!("dynamic_sql内容: {:?}", dynamic_sql);
+                let sql = generate_sql(dynamic_sql, &params, &mapper);
+                println!("生成的SQL: {}", sql);
+            }
+        }
+    }
 }
