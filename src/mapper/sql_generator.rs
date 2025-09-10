@@ -109,15 +109,8 @@ fn join_with_spaces<P: ParamsAccess>(nodes: &[DynamicSqlNode], params: &P, mappe
 
 // 改进的参数替换函数，支持两种格式参数和XML实体引用解码
 fn replace_parameters(content: &str, params: &impl ParamsAccess) -> String {
-    // 首先解码XML实体引用
-    let decoded_content = content
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-        .replace("&apos;", "'")
-        .replace("&quot;", '"'.to_string().as_str());
     // 然后处理 ${...} 格式的参数 - 原样替换，不添加单引号
-    let content_with_dollar_params = DOLLAR_PARAM_REGEX.replace_all(&decoded_content, |caps: &regex::Captures| {
+    let content_with_dollar_params = DOLLAR_PARAM_REGEX.replace_all(content, |caps: &regex::Captures| {
         let param_path = &caps[1];
 
         if let Some(value) = params.get_param(param_path) {

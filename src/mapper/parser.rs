@@ -21,8 +21,7 @@ impl MyBatisXmlParser {
         let vec_bytes = xml_bytes.to_vec();
         let cursor = Cursor::new(vec_bytes);
 
-        let mut reader = Reader::from_reader(cursor);
-        reader.config_mut().trim_text(false);
+        let reader = Reader::from_reader(cursor);
 
         MyBatisXmlParser {
             reader,
