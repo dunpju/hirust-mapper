@@ -21,7 +21,8 @@ impl MyBatisXmlParser {
         let vec_bytes = xml_bytes.to_vec();
         let cursor = Cursor::new(vec_bytes);
 
-        let reader = Reader::from_reader(cursor);
+        let mut reader = Reader::from_reader(cursor);
+        reader.config_mut().trim_text(false);
 
         MyBatisXmlParser {
             reader,
@@ -344,10 +345,30 @@ impl MyBatisXmlParser {
                     }
                 },
                 Ok(Event::Text(t)) => {
-                    let text = std::str::from_utf8(&t)?;
-                    sql_buffer.push_str(text);
+                    // 不使用标准的text_to_string方法，而是直接获取原始字节并转换为字符串
+                    // 这样可以保留XML实体引用
+                    let text = if let Ok(text) = std::str::from_utf8(&t) {
+                        text.to_string()
+                    } else {
+                        "".to_string()
+                    };
+
+                    sql_buffer.push_str(&text);
                     if !text.trim().is_empty() {
-                        dynamic_nodes.push(DynamicSqlNode::Text(text.to_string()));
+                        dynamic_nodes.push(DynamicSqlNode::Text(text));
+                    }
+                },
+                // 在parse_sql_content函数中，增加对CDATA的处理
+                Ok(Event::CData(t)) => {
+                    let text = if let Ok(text) = std::str::from_utf8(&t) {
+                        text.to_string()
+                    } else {
+                        "".to_string()
+                    };
+
+                    sql_buffer.push_str(&text);
+                    if !text.trim().is_empty() {
+                        dynamic_nodes.push(DynamicSqlNode::Text(text));
                     }
                 },
                 Ok(Event::End(_)) => break,

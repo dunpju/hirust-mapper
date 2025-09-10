@@ -107,10 +107,17 @@ fn join_with_spaces<P: ParamsAccess>(nodes: &[DynamicSqlNode], params: &P, mappe
     result.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 
-// 改进的参数替换函数，支持两种格式参数
+// 改进的参数替换函数，支持两种格式参数和XML实体引用解码
 fn replace_parameters(content: &str, params: &impl ParamsAccess) -> String {
-    // 先处理 ${...} 格式的参数 - 原样替换，不添加单引号
-    let content_with_dollar_params = DOLLAR_PARAM_REGEX.replace_all(content, |caps: &regex::Captures| {
+    // 首先解码XML实体引用
+    let decoded_content = content
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+        .replace("&apos;", "'")
+        .replace("&quot;", '"'.to_string().as_str());
+    // 然后处理 ${...} 格式的参数 - 原样替换，不添加单引号
+    let content_with_dollar_params = DOLLAR_PARAM_REGEX.replace_all(&decoded_content, |caps: &regex::Captures| {
         let param_path = &caps[1];
 
         if let Some(value) = params.get_param(param_path) {
@@ -164,6 +171,7 @@ fn replace_parameters(content: &str, params: &impl ParamsAccess) -> String {
         }
     }).to_string()
 }
+
 
 // 生成临时参数的辅助函数
 fn create_temp_params(item: &str, item_value: &Value, index: &Option<String>, index_value: usize, parent_params: &HashMap<String, Value>) -> HashMap<String, Value> {

@@ -233,6 +233,7 @@ mod tests {
     }
 
     // cargo test choose -- --show-output
+    //  $env:RUST_BACKTRACE=1; cargo test choose -- --show-output
     #[test]
     fn choose() {
         // 示例XML内容
@@ -260,6 +261,10 @@ mod tests {
             </foreach>
             AND A.examStatus IN (2, 3)
             AND A.isDelete = 0
+            <![CDATA[
+            AND A.isDelete < 10
+            AND A.isDelete > 10
+            ]]>
             AND A.examId IN (
             SELECT
             C.examId
@@ -324,7 +329,7 @@ mod tests {
             if let Some(dynamic_sql) = &statement.dynamic_sql {
                 //println!("dynamic_sql内容: {:?}", dynamic_sql);
                 let sql = generate_sql(dynamic_sql, &params, &mapper);
-                println!("生成的SQL: {}", sql);
+                println!("生成的SQL: {:?}", sql);
             }
         }
     }
