@@ -89,14 +89,14 @@ fn join_with_spaces<P: ParamsAccess>(nodes: &[DynamicSqlNode], params: &P, mappe
             // 替换换行符为空格，并将连续的多个空格合并为一个
             s.replace('\n', " ")
                 .replace('\r', "")
-                .split_whitespace()
-                .collect::<Vec<&str>>()
-                .join(" ")
         })
         .collect();
 
-    // 对非空部分添加空格连接
-    parts.join(" ")
+    // 对非空部分添加空格连接，并保留SQL结构完整性
+    let result = parts.join(" ");
+
+    // 修复多余空格但保留SQL语句的逻辑结构
+    result.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 
 // 生成临时参数的辅助函数
