@@ -300,6 +300,43 @@ impl MyBatisXmlParser {
                             contents,
                         });
                     },
+                    b"choose" => {
+                        let mut whens = Vec::new();
+                        let mut otherwise = None;
+
+                        loop {
+                            match self.reader.read_event_into(&mut self.buf) {
+                                Ok(Event::Start(e)) => match e.name().as_ref() {
+                                    b"when" => {
+                                        let test_attr = e.attributes().find(|a| {
+                                            a.as_ref().unwrap().key.as_ref() == b"test"
+                                        }).ok_or("when标签缺少test属性")?;
+                                        let test = std::str::from_utf8(&test_attr.unwrap().value)?.to_string();
+                                        let test = test.trim().to_string();
+
+                                        let mut contents = Vec::new();
+                                        self.parse_sql_content(&mut String::new(), &mut contents)?;
+                                        whens.push((test, contents));
+                                    },
+                                    b"otherwise" => {
+                                        let mut contents = Vec::new();
+                                        self.parse_sql_content(&mut String::new(), &mut contents)?;
+                                        otherwise = Some(contents);
+                                    },
+                                    _ => break
+                                },
+                                Ok(Event::End(_)) => break,
+                                Ok(Event::Eof) => break,
+                                Err(e) => return Err(Box::new(e)),
+                                _ => {}
+                            }
+                        }
+
+                        dynamic_nodes.push(DynamicSqlNode::Choose {
+                            whens,
+                            otherwise
+                        });
+                    },
                     // 处理其他动态SQL标签...
                     _ => {
                         // 未知标签，作为普通文本处理

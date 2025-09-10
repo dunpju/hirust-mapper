@@ -313,7 +313,9 @@ mod tests {
             new_exam_course2.insert("uniqueKey".to_string(), Value::String("test-key".to_string()));
 
             // 将newExamCourse对象添加到newExamCourseList数组中
-            let new_exam_course_list = vec![Value::Object(new_exam_course1), Value::Object(new_exam_course2)];
+            let new_exam_course_list = vec![Value::Object(new_exam_course1),
+                                            Value::Object(new_exam_course2)
+            ];
 
             // 添加examIds数组参数
             let exam_ids = vec![Value::Number(1.into()), Value::Number(2.into())];
