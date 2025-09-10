@@ -10,6 +10,11 @@ pub trait ParamsAccess {
 
     // 获取集合参数
     fn get_collection(&self, key: &str) -> Option<&Vec<Value>>;
+
+    // 获取参数的HashMap表示（用于嵌套参数传递）
+    fn as_hash_map(&self) -> Option<&HashMap<String, Value>> {
+        None // 默认实现返回None
+    }
 }
 
 // 为HashMap<String, Value>实现ParamsAccess
@@ -25,6 +30,10 @@ impl ParamsAccess for HashMap<String, Value> {
         } else {
             None
         }
+    }
+    // 实现as_hash_map方法，返回自身的引用
+    fn as_hash_map(&self) -> Option<&HashMap<String, Value>> {
+        Some(self)
     }
 }
 
@@ -65,8 +74,10 @@ fn join_with_spaces<P: ParamsAccess>(nodes: &[DynamicSqlNode], params: &P, mappe
 }
 
 // 生成临时参数的辅助函数
-fn create_temp_params(item: &str, item_value: &Value, index: &Option<String>, index_value: usize) -> HashMap<String, Value> {
-    let mut temp_params = HashMap::new();
+fn create_temp_params(item: &str, item_value: &Value, index: &Option<String>, index_value: usize, parent_params: &HashMap<String, Value>) -> HashMap<String, Value> {
+    // 复制父参数，保留外层循环的参数
+    let mut temp_params = parent_params.clone();
+    // 设置当前循环的item和index参数
     temp_params.insert(item.to_string(), item_value.clone());
 
     if let Some(index_name) = index {
@@ -74,6 +85,15 @@ fn create_temp_params(item: &str, item_value: &Value, index: &Option<String>, in
     }
 
     temp_params
+}
+
+// 安全获取父参数的辅助函数
+fn get_parent_params<P: ParamsAccess>(params: &P) -> HashMap<String, Value> {
+    if let Some(map) = params.as_hash_map() {
+        map.clone()
+    } else {
+        HashMap::new() // 无法获取父参数时使用空HashMap
+    }
 }
 
 // 泛型版本的generate_sql函数
@@ -97,14 +117,17 @@ pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P, mapper: 
                 let mut result = open.clone();
                 let mut is_first = true;
 
+                // 转换params为HashMap以便传递给create_temp_params
+                let parent_params = get_parent_params(params);
+
                 for (i, item_value) in items.iter().enumerate() {
                     if !is_first {
                         result.push_str(separator);
                     }
                     is_first = false;
 
-                    // 创建临时参数
-                    let temp_params = create_temp_params(item, item_value, index, i);
+                    // 创建临时参数，传递父参数
+                    let temp_params = create_temp_params(item, item_value, index, i, &parent_params);
 
                     // 生成子节点SQL
                     let item_sql = join_with_spaces(contents, &temp_params, mapper);
@@ -124,14 +147,17 @@ pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P, mapper: 
                 let mut result = open.clone();
                 let mut is_first = true;
 
+                // 转换params为HashMap以便传递给create_temp_params
+                let parent_params = get_parent_params(params);
+
                 for (i, item_value) in items.iter().enumerate() {
                     if !is_first {
                         result.push_str(separator);
                     }
                     is_first = false;
 
-                    // 创建临时参数
-                    let temp_params = create_temp_params(item, item_value, index, i);
+                    // 创建临时参数，传递父参数
+                    let temp_params = create_temp_params(item, item_value, index, i, &parent_params);
 
                     // 生成子节点SQL
                     let item_sql = join_with_spaces(contents, &temp_params, mapper);

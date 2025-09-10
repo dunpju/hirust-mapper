@@ -247,8 +247,27 @@ mod tests {
             //println!("SQL片段列表: {:?}", mapper.sql_fragments.keys());
 
             // 准备参数
-            let mut params: HashMap<String, Vec<Value>> = HashMap::new();
-            params.insert("companies".to_string(), vec![Value::Number(1.into())]);
+            let mut params: HashMap<String, Value> = HashMap::new();
+            // 创建newExamCourse对象
+            let mut new_exam_course1 = serde_json::Map::new();
+            new_exam_course1.insert("selectContainCourse".to_string(), Value::String("1,2,3".to_string()));
+            new_exam_course1.insert("courseIds".to_string(), Value::String("1001".to_string()));
+            new_exam_course1.insert("uniqueKey".to_string(), Value::String("test-key".to_string()));
+
+            let mut new_exam_course2 = serde_json::Map::new();
+            new_exam_course2.insert("selectContainCourse".to_string(), Value::String("1,2,3".to_string()));
+            new_exam_course2.insert("courseIds".to_string(), Value::String("1001".to_string()));
+            new_exam_course2.insert("uniqueKey".to_string(), Value::String("test-key".to_string()));
+
+            // 将newExamCourse对象添加到newExamCourseList数组中
+            let new_exam_course_list = vec![Value::Object(new_exam_course1), Value::Object(new_exam_course2)];
+
+            // 添加examIds数组参数
+            let exam_ids = vec![Value::Number(1.into()), Value::Number(2.into())];
+
+            // 设置参数
+            params.insert("newExamCourseList".to_string(), Value::Array(new_exam_course_list));
+            params.insert("examIds".to_string(), Value::Array(exam_ids));
             // 生成最终SQL
             if let Some(dynamic_sql) = &statement.dynamic_sql {
                 //println!("dynamic_sql内容: {:?}", dynamic_sql);
