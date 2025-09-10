@@ -240,6 +240,68 @@ pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P, mapper: 
                 String::new()
             }
         },
+        DynamicSqlNode::Where { prefix_overrides, suffix_overrides, contents } => {
+            // Where节点的处理逻辑，类似于Trim但有特定的默认值
+            let mut sql = join_with_spaces(contents, params, mapper);
+
+            // 处理prefix_overrides，默认值为"AND |OR "
+            let effective_prefix_overrides = prefix_overrides.as_deref().unwrap_or("AND |OR ");
+            for override_str in effective_prefix_overrides.split('|').map(|s| s.trim()) {
+                if sql.starts_with(override_str) {
+                    sql = sql[override_str.len()..].trim_start().to_string();
+                    break;
+                }
+            }
+
+            // 处理suffix_overrides
+            if let Some(overrides) = suffix_overrides {
+                for override_str in overrides.split(',').map(|s| s.trim()) {
+                    if sql.ends_with(override_str) {
+                        sql = sql[..sql.len() - override_str.len()].trim_end().to_string();
+                        break;
+                    }
+                }
+            }
+
+            // 如果sql不为空，添加WHERE前缀
+            if !sql.is_empty() {
+                // 确保WHERE和sql之间有空格
+                format!("WHERE {}", sql.trim_start())
+            } else {
+                String::new()
+            }
+        },
+        // 添加Set节点处理逻辑
+        DynamicSqlNode::Set { prefix_overrides, suffix_overrides, contents } => {
+            // Set节点的处理逻辑，类似于Trim但有特定的默认值
+            let mut sql = join_with_spaces(contents, params, mapper);
+
+            // 处理prefix_overrides
+            if let Some(overrides) = prefix_overrides {
+                for override_str in overrides.split('|').map(|s| s.trim()) {
+                    if sql.starts_with(override_str) {
+                        sql = sql[override_str.len()..].trim_start().to_string();
+                        break;
+                    }
+                }
+            }
+
+            // 处理suffix_overrides，默认值为","（去除结尾的逗号）
+            let effective_suffix_overrides = suffix_overrides.as_deref().unwrap_or(",");
+            for override_str in effective_suffix_overrides.split('|').map(|s| s.trim()) {
+                if sql.ends_with(override_str) {
+                    sql = sql[..sql.len() - override_str.len()].trim_end().to_string();
+                    break;
+                }
+            }
+
+            // 处理prefix，默认值为"SET"
+            if !sql.is_empty() {
+                sql = format!("SET {}", sql.trim_start());
+            }
+
+            sql
+        },
     }
 }
 

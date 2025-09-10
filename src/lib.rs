@@ -90,7 +90,7 @@ mod tests {
         let mapper = parser.parse_mapper().unwrap();
         println!("解析结果: {:?} \n", mapper);
 
-        // 获取SQL语句
+        /*// 获取SQL语句
         if let Some(statement) = mapper.statements.get("findUserById") {
             // 准备参数
             let mut params: HashMap<String, Value> = HashMap::new();
@@ -164,7 +164,7 @@ mod tests {
                 let sql = generate_sql(dynamic_sql, &params, &mapper);
                 println!("生成的SQL: {}", sql);
             }
-        }
+        }*/
         // 获取SQL语句
         if let Some(statement) = mapper.statements.get("batchUpdateCaseWhen") {
             // 添加调试信息

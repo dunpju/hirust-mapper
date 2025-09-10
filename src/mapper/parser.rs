@@ -220,6 +220,86 @@ impl MyBatisXmlParser {
                             contents,
                         });
                     },
+                    b"where" => {
+                        // 解析where标签
+                        let mut prefix_overrides = None;
+                        let mut suffix_overrides = None;
+
+                        // 解析where标签的属性
+                        for attr in e.attributes() {
+                            let attr = attr?;
+                            match attr.key.as_ref() {
+                                b"prefixOverrides" => prefix_overrides = Some(std::str::from_utf8(&attr.value)?.to_string()),
+                                b"suffixOverrides" => suffix_overrides = Some(std::str::from_utf8(&attr.value)?.to_string()),
+                                _ => {}
+                            }
+                        }
+
+                        let mut contents = Vec::new();
+                        self.parse_sql_content(&mut String::new(), &mut contents)?;
+                        dynamic_nodes.push(DynamicSqlNode::Where {
+                            prefix_overrides,
+                            suffix_overrides,
+                            contents,
+                        });
+                    },
+                    // 添加trim标签解析逻辑
+                    b"trim" => {
+                        // 解析trim标签属性
+                        let mut prefix = None;
+                        let mut prefix_overrides = None;
+                        let mut suffix = None;
+                        let mut suffix_overrides = None;
+
+                        // 解析trim标签的所有属性
+                        for attr in e.attributes() {
+                            let attr = attr?;
+                            match attr.key.as_ref() {
+                                b"prefix" => prefix = Some(std::str::from_utf8(&attr.value)?.to_string()),
+                                b"prefixOverrides" => prefix_overrides = Some(std::str::from_utf8(&attr.value)?.to_string()),
+                                b"suffix" => suffix = Some(std::str::from_utf8(&attr.value)?.to_string()),
+                                b"suffixOverrides" => suffix_overrides = Some(std::str::from_utf8(&attr.value)?.to_string()),
+                                _ => {}
+                            }
+                        }
+
+                        // 解析trim标签的内容
+                        let mut contents = Vec::new();
+                        self.parse_sql_content(&mut String::new(), &mut contents)?;
+
+                        // 创建Trim类型的动态SQL节点
+                        dynamic_nodes.push(DynamicSqlNode::Trim {
+                            prefix,
+                            prefix_overrides,
+                            suffix,
+                            suffix_overrides,
+                            contents,
+                        });
+                    },
+                    // 添加set标签解析逻辑
+                    b"set" => {
+                        // 解析set标签属性
+                        let mut prefix_overrides = None;
+                        let mut suffix_overrides = None;
+
+                        // 解析set标签的属性
+                        for attr in e.attributes() {
+                            let attr = attr?;
+                            match attr.key.as_ref() {
+                                b"prefixOverrides" => prefix_overrides = Some(std::str::from_utf8(&attr.value)?.to_string()),
+                                b"suffixOverrides" => suffix_overrides = Some(std::str::from_utf8(&attr.value)?.to_string()),
+                                _ => {}
+                            }
+                        }
+
+                        let mut contents = Vec::new();
+                        self.parse_sql_content(&mut String::new(), &mut contents)?;
+                        dynamic_nodes.push(DynamicSqlNode::Set {
+                            prefix_overrides,
+                            suffix_overrides,
+                            contents,
+                        });
+                    },
                     // 处理其他动态SQL标签...
                     _ => {
                         // 未知标签，作为普通文本处理

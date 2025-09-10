@@ -102,4 +102,16 @@ pub enum DynamicSqlNode {
     Include {
         ref_id: String,
     },
+    // 添加Where节点类型，类似于Trim但有默认的prefix和suffix处理
+    Where {
+        prefix_overrides: Option<String>,
+        suffix_overrides: Option<String>,
+        contents: Vec<DynamicSqlNode>,
+    },
+    // 添加Set节点类型，类似于Trim但有默认的prefix和suffix_overrides处理
+    Set {
+        prefix_overrides: Option<String>,
+        suffix_overrides: Option<String>,
+        contents: Vec<DynamicSqlNode>,
+    },
 }
