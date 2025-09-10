@@ -181,4 +181,81 @@ mod tests {
             }
         }
     }
+
+    // cargo test choose -- --show-output
+    #[test]
+    fn choose() {
+        // 示例XML内容
+        let xml_content = r#"<?xml version="1.0" encoding="UTF-8"?>
+    <mapper namespace="com.example.UserMapper">
+    <select id="getCourseExamList" resultType="com.qimingdaren.errorbook.dto.exam.ExamJoinSysExamTypeVO">
+        <foreach collection="newExamCourseList" item="newExamCourse" separator="UNION">
+            (SELECT
+            A.examId,
+            A.areaCode,
+            A.startDate,
+            A.examYear,
+            A.examMonth,
+            B.moduleType,
+            #{newExamCourse.courseIds} AS courseIds,
+            #{newExamCourse.uniqueKey} AS uniqueKey
+            FROM
+            exam A,
+            sys_exam_type B
+            WHERE
+            A.examTypeId = B.sysExamTypeId
+            AND A.examId IN
+            <foreach collection="examIds" item="id" open="(" separator="," close=")">
+                #{id}
+            </foreach>
+            AND A.examStatus IN (2, 3)
+            AND A.isDelete = 0
+            AND A.examId IN (
+            SELECT
+            C.examId
+            FROM
+            report_data C
+            WHERE
+            C.examId IN
+            <foreach collection="examIds" item="id" open="(" separator="," close=")">
+                #{id}
+            </foreach>
+            <choose>
+                <when test="newExamCourse.selectContainCourse != null and newExamCourse.selectContainCourse != ''">
+                    AND C.sysCourseId IN(#{newExamCourse.selectContainCourse})
+                </when>
+                <otherwise>
+                    AND C.sysCourseId IN(0)
+                </otherwise>
+            </choose>
+            )
+            ORDER BY
+            A.startDate DESC
+            LIMIT 10)
+        </foreach>
+    </select>
+    </mapper>"#;
+
+        // 解析XML
+        let mut parser = MyBatisXmlParser::new(xml_content);
+        let mapper = parser.parse_mapper().unwrap();
+        println!("解析结果: {:?} \n", mapper);
+
+        // 获取SQL语句
+        if let Some(statement) = mapper.statements.get("getCourseExamList") {
+            // 添加调试信息
+            //println!("SQL片段列表: {:?}", mapper.sql_fragments.keys());
+
+            // 准备参数
+            let mut params: HashMap<String, Vec<Value>> = HashMap::new();
+            params.insert("companies".to_string(), vec![Value::Number(1.into())]);
+            // 生成最终SQL
+            if let Some(dynamic_sql) = &statement.dynamic_sql {
+                //println!("dynamic_sql内容: {:?}", dynamic_sql);
+                let sql = generate_sql(dynamic_sql, &params, &mapper);
+                println!("生成的SQL: {}", sql);
+            }
+        }
+    }
+
 }
