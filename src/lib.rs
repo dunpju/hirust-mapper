@@ -182,6 +182,59 @@ mod tests {
         }
     }
 
+    // cargo test update_case_when -- --show-output
+    #[test]
+    fn update_case_when() {
+        // 示例XML内容
+        let xml_content = r#"<?xml version="1.0" encoding="UTF-8"?>
+    <mapper namespace="com.example.UserMapper">
+       <update id="batchUpdateCaseWhen">
+        UPDATE company
+        <set>
+        <trim prefix="`company_name`= CASE company_id" suffix="END,">
+            <foreach collection="companies" item="company">
+                WHEN #{company.companyId} THEN #{company.companyName}
+            </foreach>
+        </trim>
+        <trim prefix="`is_delete` = CASE company_id" suffix="END,">
+            <foreach collection="companies" item="company">
+                WHEN #{company.companyId} THEN #{company.isDelete}
+            </foreach>
+        </trim>
+        </trim>
+        </set>
+        <where>
+            <foreach collection="companies" item="company" separator="AND">
+                company_id = #{company.companyId}
+            </foreach>
+        </where>
+        </update>
+    </mapper>"#;
+
+        //let xml_content = include_str!("../privilege_project.xml");
+
+        // 解析XML
+        let mut parser = MyBatisXmlParser::new(xml_content);
+        let mapper = parser.parse_mapper().unwrap();
+        println!("解析结果: {:?} \n", mapper);
+
+        // 获取SQL语句
+        if let Some(statement) = mapper.statements.get("batchUpdateCaseWhen") {
+            // 添加调试信息
+            //println!("SQL片段列表: {:?}", mapper.sql_fragments.keys());
+
+            // 准备参数
+            let mut params: HashMap<String, Vec<Value>> = HashMap::new();
+            params.insert("companies".to_string(), vec![Value::Number(1.into())]);
+            // 生成最终SQL
+            if let Some(dynamic_sql) = &statement.dynamic_sql {
+                //println!("dynamic_sql内容: {:?}", dynamic_sql);
+                let sql = generate_sql(dynamic_sql, &params, &mapper);
+                println!("生成的SQL: {}", sql);
+            }
+        }
+    }
+
     // cargo test choose -- --show-output
     #[test]
     fn choose() {
