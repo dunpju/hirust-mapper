@@ -358,11 +358,28 @@ mod tests {
             //println!("SQL片段列表: {:?}", mapper.sql_fragments.keys());
 
             // 准备参数
-            let mut params: HashMap<String, Vec<Value>> = HashMap::new();
-            params.insert("entityList".to_string(), vec![Value::Number(1.into()), Value::Number(2.into())]);
+            let mut params: HashMap<String, Value> = HashMap::new();
+
+            // 创建符合XML期望的参数结构
+            let mut entity_list = Vec::new();
+
+            // 创建第一个实体对象
+            let mut entity1 = serde_json::Map::new();
+            entity1.insert("bookId".to_string(), Value::Number(100.into()));
+            entity1.insert("schoolId".to_string(), Value::Number(200.into()));
+            entity_list.push(Value::Object(entity1));
+
+            // 创建第二个实体对象
+            let mut entity2 = serde_json::Map::new();
+            entity2.insert("bookId".to_string(), Value::Number(101.into()));
+            entity2.insert("schoolId".to_string(), Value::Number(201.into()));
+            entity_list.push(Value::Object(entity2));
+
+            // 将实体列表添加到参数中
+            params.insert("entityList".to_string(), Value::Array(entity_list));
+
             // 生成最终SQL
             if let Some(dynamic_sql) = &statement.dynamic_sql {
-                //println!("dynamic_sql内容: {:?}", dynamic_sql);
                 let sql = generate_sql(dynamic_sql, &params, &mapper);
                 println!("生成的SQL: {}", sql);
             }

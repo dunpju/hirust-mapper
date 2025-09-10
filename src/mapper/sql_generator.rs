@@ -2,6 +2,12 @@ use super::model::DynamicSqlNode;
 use std::collections::HashMap;
 use serde_json::Value;
 use crate::Mapper;
+use regex::Regex;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref PARAM_REGEX: Regex = Regex::new(r#"#\{([^}]*)\}"#).unwrap();
+}
 
 // 定义参数访问trait
 pub trait ParamsAccess {
@@ -99,6 +105,38 @@ fn join_with_spaces<P: ParamsAccess>(nodes: &[DynamicSqlNode], params: &P, mappe
     result.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 
+// 改进的参数替换函数
+fn replace_parameters(content: &str, params: &impl ParamsAccess) -> String {
+    PARAM_REGEX.replace_all(content, |caps: &regex::Captures| {
+        let param_path = &caps[1];
+
+        if let Some(value) = params.get_param(param_path) {
+            match value {
+                Value::String(s) => {
+                    let escaped = s.replace('\'', "''");
+                    format!("'{escaped}'")
+                },
+                Value::Number(n) => n.to_string(),
+                Value::Bool(b) => if *b { "1".to_string() } else { "0".to_string() },
+                Value::Null => "NULL".to_string(),
+                _ => {
+                    // 对于其他类型，尝试转换为字符串表示
+                    if let Ok(json_str) = serde_json::to_string(value) {
+                        format!("'{json_str}'")
+                    } else {
+                        "NULL".to_string()
+                    }
+                }
+            }
+        } else {
+            // 如果参数不存在，输出警告并返回NULL
+            eprintln!("警告: 找不到参数 '{}'", param_path);
+            "NULL".to_string()
+        }
+    }).to_string()
+}
+
+
 // 生成临时参数的辅助函数
 fn create_temp_params(item: &str, item_value: &Value, index: &Option<String>, index_value: usize, parent_params: &HashMap<String, Value>) -> HashMap<String, Value> {
     // 复制父参数，保留外层循环的参数
@@ -125,7 +163,10 @@ fn get_parent_params<P: ParamsAccess>(params: &P) -> HashMap<String, Value> {
 // 泛型版本的generate_sql函数
 pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P, mapper: &Mapper) -> String {
     match node {
-        DynamicSqlNode::Text(content) => content.clone(),
+        DynamicSqlNode::Text(content) => {
+            // 添加参数替换逻辑
+            replace_parameters(content, params)
+        },
         DynamicSqlNode::If { test, contents } => {
             if evaluate_condition(test, params) {
                 join_with_spaces(contents, params, mapper)
