@@ -1,525 +1,423 @@
 use super::model::DynamicSqlNode;
+use super::model::MapperError;
 use std::collections::HashMap;
 use serde_json::Value;
 use crate::Mapper;
 use regex::Regex;
 use lazy_static::lazy_static;
 
-// 在lazy_static块中添加新的正则表达式
 lazy_static! {
     static ref PARAM_REGEX: Regex = Regex::new(r#"#\{([^}]*)\}"#).unwrap();
     static ref DOLLAR_PARAM_REGEX: Regex = Regex::new(r#"\$\{([^}]*)\}"#).unwrap();
+    static ref CONDITION_REGEX: Regex = Regex::new(r"^\s*([\w\.\(\)]+)\s*([!=<>]+)\s*(.+?)\s*$").unwrap();
 }
 
-// 定义参数访问trait
+// ─── 参数访问 trait ───────────────────────────────────────────────
+
+/// 参数访问抽象 trait
 pub trait ParamsAccess {
-    // 获取单个参数值
+    /// 获取单个参数值（支持嵌套属性，如 "user.name"）
     fn get_param(&self, key: &str) -> Option<&Value>;
 
-    // 获取集合参数
+    /// 获取集合参数
     fn get_collection(&self, key: &str) -> Option<&Vec<Value>>;
 
-    // 获取参数的HashMap表示（用于嵌套参数传递）
+    /// 获取参数的HashMap表示（用于嵌套参数传递）
     fn as_hash_map(&self) -> Option<&HashMap<String, Value>> {
-        None // 默认实现返回None
+        None
     }
 }
 
-// 为HashMap<String, Value>实现ParamsAccess
 impl ParamsAccess for HashMap<String, Value> {
     fn get_param(&self, key: &str) -> Option<&Value> {
-        // 支持嵌套属性访问，例如 newExamCourse.selectContainCourse
         if key.contains('.') {
             let parts: Vec<&str> = key.split('.').collect();
-            // 先检查第一个属性是否存在于顶级参数中
-            if let Some(first_value) = self.get(parts[0]) {
-                let mut current_value = first_value;
-
-                // 从第二个属性开始逐层查找
-                for part in &parts[1..] {
-                    if let Value::Object(map) = current_value {
-                        if let Some(next_value) = map.get(*part) {
-                            current_value = next_value;
-                        } else {
-                            return None; // 属性不存在
-                        }
-                    } else {
-                        return None; // 中间层次不是对象类型
-                    }
-                }
-
-                return Some(current_value);
+            let mut current = self.get(parts[0])?;
+            for part in &parts[1..] {
+                current = current.get(*part)?;
             }
-            return None; // 第一个属性不存在
+            Some(current)
         } else {
-            // 保持原有的单级属性访问
             self.get(key)
         }
     }
 
     fn get_collection(&self, key: &str) -> Option<&Vec<Value>> {
-        // 尝试从数组类型的值中获取集合
         if let Some(Value::Array(arr)) = self.get(key) {
             Some(arr)
         } else {
             None
         }
     }
-    // 实现as_hash_map方法，返回自身的引用
+
     fn as_hash_map(&self) -> Option<&HashMap<String, Value>> {
         Some(self)
     }
 }
 
-// 为HashMap<String, Vec<Value>>实现ParamsAccess
-impl ParamsAccess for HashMap<String, Vec<Value>> {
-    fn get_param(&self, _key: &str) -> Option<&Value> {
-        // 对于这种类型，默认不支持单个参数访问
-        None
-    }
+// ─── 条件表达式求值 ──────────────────────────────────────────────
 
-    fn get_collection(&self, key: &str) -> Option<&Vec<Value>> {
-        self.get(key)
-    }
+#[derive(Debug)]
+struct KeyValue {
+    key: String,
+    condition: String,
+    value: String,
 }
 
-// 修改join_with_spaces辅助函数
-fn join_with_spaces<P: ParamsAccess>(nodes: &[DynamicSqlNode], params: &P, mapper: &Mapper) -> String {
-    let parts: Vec<String> = nodes.iter()
-        .map(|n| {
-            let sql = generate_sql(n, params, mapper);
-            // 添加调试信息
-            //println!("节点类型: {:?}, 生成的SQL: {}", n, sql);
-            sql
-        })
-        .filter(|s| !s.trim().is_empty())  // 过滤掉空字符串
-        .map(|s| {
-            // 替换换行符为空格，并将连续的多个空格合并为一个
-            s.replace('\n', " ")
-                .replace('\r', "")
-        })
-        .collect();
-
-    // 对非空部分添加空格连接，并保留SQL结构完整性
-    let result = parts.join(" ");
-
-    // 修复多余空格但保留SQL语句的逻辑结构
-    result.split_whitespace().collect::<Vec<&str>>().join(" ")
+/// 条件组：一组由 and 连接的条件，多个组之间用 or 连接
+struct ConditionGroup {
+    conditions: Vec<KeyValue>,
 }
 
-// 改进的参数替换函数，支持两种格式参数和XML实体引用解码
-fn replace_parameters(content: &str, params: &impl ParamsAccess) -> String {
-    // 然后处理 ${...} 格式的参数 - 原样替换，不添加单引号
-    let content_with_dollar_params = DOLLAR_PARAM_REGEX.replace_all(content, |caps: &regex::Captures| {
-        let param_path = &caps[1];
+impl ConditionGroup {
+    /// 解析条件表达式，支持 "and" 和 "or" 连接（and 优先级高于 or）
+    fn parse(expr: &str) -> Result<Vec<Self>, MapperError> {
+        let mut groups = Vec::new();
 
-        if let Some(value) = params.get_param(param_path) {
-            match value {
-                Value::String(s) => s.to_string(),
-                Value::Number(n) => n.to_string(),
-                Value::Bool(b) => if *b { "1".to_string() } else { "0".to_string() },
-                Value::Null => "NULL".to_string(),
-                _ => {
-                    // 对于其他类型，尝试转换为字符串表示
-                    if let Ok(json_str) = serde_json::to_string(value) {
-                        json_str
-                    } else {
-                        "NULL".to_string()
-                    }
-                }
+        for or_part in expr.split(" or ") {
+            let trimmed_or = or_part.trim();
+            if trimmed_or.is_empty() {
+                continue;
             }
-        } else {
-            // 如果参数不存在，输出警告并返回NULL
-            eprintln!("警告: 找不到参数 '{}'", param_path);
-            "NULL".to_string()
+
+            let mut and_conditions = Vec::new();
+            for cond in trimmed_or.split(" and ") {
+                let trimmed = cond.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                let caps = CONDITION_REGEX.captures(trimmed)
+                    .ok_or_else(|| MapperError::InvalidCondition {
+                        expr: trimmed.to_string(),
+                        reason: "无法匹配 key op value 格式".to_string(),
+                    })?;
+
+                and_conditions.push(KeyValue {
+                    key: caps[1].to_string(),
+                    condition: caps[2].to_string(),
+                    value: caps[3].to_string(),
+                });
+            }
+
+            if !and_conditions.is_empty() {
+                groups.push(ConditionGroup { conditions: and_conditions });
+            }
+        }
+
+        Ok(groups)
+    }
+}
+
+/// 评估单个比较条件
+fn evaluate_single(kv: &KeyValue, params: &impl ParamsAccess) -> bool {
+    match params.get_param(&kv.key) {
+        Some(value) => {
+            match kv.condition.as_str() {
+                "=" | "==" => {
+                    if kv.value == "null" {
+                        return false;
+                    } else if kv.value.starts_with('\'') && kv.value.ends_with('\'') {
+                        let str_val = kv.value.trim_matches('\'');
+                        matches!(value, Value::String(s) if s == str_val)
+                    } else if let Ok(num) = kv.value.parse::<i64>() {
+                        matches!(value, Value::Number(n) if n.as_i64() == Some(num))
+                    } else {
+                        false
+                    }
+                },
+                "!=" => {
+                    if kv.value == "null" {
+                        return true;
+                    } else if kv.value.starts_with('\'') && kv.value.ends_with('\'') {
+                        let str_val = kv.value.trim_matches('\'');
+                        matches!(value, Value::String(s) if s != str_val)
+                    } else if let Ok(num) = kv.value.parse::<i64>() {
+                        matches!(value, Value::Number(n) if n.as_i64() != Some(num))
+                    } else {
+                        false // 类型不匹配时返回false，而非true
+                    }
+                },
+                op @ (">" | "<" | ">=" | "<=") => {
+                    if let Ok(num) = kv.value.parse::<i64>() {
+                        if let Some(n) = value.as_i64() {
+                            return match op {
+                                ">" => n > num,
+                                "<" => n < num,
+                                ">=" => n >= num,
+                                "<=" => n <= num,
+                                _ => false,
+                            };
+                        }
+                    }
+                    false
+                },
+                _ => false
+            }
+        },
+        None => {
+            // 参数不存在时，只有 "key == null" 为 true
+            kv.condition == "=" && kv.value == "null"
+        }
+    }
+}
+
+fn evaluate_condition(condition: &str, params: &impl ParamsAccess) -> bool {
+    let groups = ConditionGroup::parse(condition).unwrap_or_default();
+    // 组间 or，组内 and
+    groups.iter().any(|group| {
+        group.conditions.iter().all(|kv| evaluate_single(kv, params))
+    })
+}
+
+// ─── 辅助函数 ─────────────────────────────────────────────────────
+
+fn get_parent_params<P: ParamsAccess>(params: &P) -> HashMap<String, Value> {
+    params.as_hash_map().cloned().unwrap_or_default()
+}
+
+/// 创建foreach迭代时的临时参数上下文（继承父参数 + 注入 item/index）
+fn create_temp_params(
+    item: &str, item_value: &Value,
+    index: &Option<String>, index_value: usize,
+    parent_params: &HashMap<String, Value>,
+) -> HashMap<String, Value> {
+    let mut temp = parent_params.clone();
+    temp.insert(item.to_string(), item_value.clone());
+    if let Some(idx_name) = index {
+        temp.insert(idx_name.clone(), Value::Number(index_value.into()));
+    }
+    temp
+}
+
+/// 将节点序列拼接为SQL，支持bind变量注入
+fn join_with_spaces<P: ParamsAccess>(nodes: &[DynamicSqlNode], params: &P, mapper: &Mapper) -> Result<String, MapperError> {
+    let mut parts = Vec::new();
+    let mut enriched = get_parent_params(params);
+
+    for n in nodes {
+        match n {
+            DynamicSqlNode::Bind { name, value } => {
+                let resolved = replace_parameters(value, &enriched)?;
+                enriched.insert(name.clone(), Value::String(resolved));
+            },
+            _ => {
+                let sql = generate_sql(n, &enriched, mapper)?;
+                if !sql.trim().is_empty() {
+                    parts.push(sql.replace('\n', " ").replace('\r', ""));
+                }
+            },
+        }
+    }
+
+    let result = parts.join(" ");
+    // 合并连续空白
+    Ok(result.split_whitespace().collect::<Vec<&str>>().join(" "))
+}
+
+/// 替换 #{...} 和 ${...} 占位符
+fn replace_parameters(content: &str, params: &impl ParamsAccess) -> Result<String, MapperError> {
+    // 先处理 ${...} — 原样替换，不加引号
+    let with_dollar = DOLLAR_PARAM_REGEX.replace_all(content, |caps: &regex::Captures| {
+        let path = &caps[1];
+        match params.get_param(path) {
+            Some(Value::String(s)) => s.to_string(),
+            Some(Value::Number(n)) => n.to_string(),
+            Some(Value::Bool(b)) => if *b { "1".to_string() } else { "0".to_string() },
+            Some(Value::Null) => "NULL".to_string(),
+            Some(v) => serde_json::to_string(v).unwrap_or_else(|_| "NULL".to_string()),
+            None => return format!("/* MISSING:${} */", path),
         }
     }).to_string();
 
-    // 然后处理 #{...} 格式的参数 - 添加单引号包裹
-    PARAM_REGEX.replace_all(&content_with_dollar_params, |caps: &regex::Captures| {
-        let param_path = &caps[1];
-
-        if let Some(value) = params.get_param(param_path) {
-            match value {
-                Value::String(s) => {
-                    let escaped = s.replace('\'', "''");
-                    format!("'{escaped}'")
-                },
-                Value::Number(n) => n.to_string(),
-                Value::Bool(b) => if *b { "1".to_string() } else { "0".to_string() },
-                Value::Null => "NULL".to_string(),
-                _ => {
-                    // 对于其他类型，尝试转换为字符串表示
-                    if let Ok(json_str) = serde_json::to_string(value) {
-                        format!("'{json_str}'")
-                    } else {
-                        "NULL".to_string()
-                    }
-                }
-            }
-        } else {
-            // 如果参数不存在，输出警告并返回NULL
-            eprintln!("警告: 找不到参数 '{}'", param_path);
-            "NULL".to_string()
+    // 再处理 #{...} — 字符串加引号
+    Ok(PARAM_REGEX.replace_all(&with_dollar, |caps: &regex::Captures| {
+        let path = &caps[1];
+        match params.get_param(path) {
+            Some(Value::String(s)) => {
+                let escaped = s.replace('\'', "''");
+                format!("'{escaped}'")
+            },
+            Some(Value::Number(n)) => n.to_string(),
+            Some(Value::Bool(b)) => if *b { "1".to_string() } else { "0".to_string() },
+            Some(Value::Null) => "NULL".to_string(),
+            Some(v) => {
+                let json = serde_json::to_string(v).unwrap_or_else(|_| "NULL".to_string());
+                format!("'{json}'")
+            },
+            None => return format!("/* MISSING:#{} */", path),
         }
-    }).to_string()
+    }).to_string())
 }
 
+/// 去除SQL前缀/后缀的公共逻辑
+fn strip_overrides(sql: &str, overrides: Option<&str>, default: Option<&str>, strip_prefix: bool) -> String {
+    let effective = overrides.or(default).unwrap_or("");
+    let mut result = sql.to_string();
 
-// 生成临时参数的辅助函数
-fn create_temp_params(item: &str, item_value: &Value, index: &Option<String>, index_value: usize, parent_params: &HashMap<String, Value>) -> HashMap<String, Value> {
-    // 复制父参数，保留外层循环的参数
-    let mut temp_params = parent_params.clone();
-    // 设置当前循环的item和index参数
-    temp_params.insert(item.to_string(), item_value.clone());
-
-    if let Some(index_name) = index {
-        temp_params.insert(index_name.clone(), Value::Number(index_value.into()));
+    for part in effective.split('|').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if strip_prefix && result.starts_with(part) {
+            result = result[part.len()..].trim_start().to_string();
+            break;
+        }
+        if !strip_prefix && result.ends_with(part) {
+            result = result[..result.len() - part.len()].trim_end().to_string();
+            break;
+        }
     }
 
-    temp_params
+    result
 }
 
-// 安全获取父参数的辅助函数
-fn get_parent_params<P: ParamsAccess>(params: &P) -> HashMap<String, Value> {
-    if let Some(map) = params.as_hash_map() {
-        map.clone()
-    } else {
-        HashMap::new() // 无法获取父参数时使用空HashMap
-    }
-}
+// ─── 核心 SQL 生成 ────────────────────────────────────────────────
 
-// 泛型版本的generate_sql函数
-pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P, mapper: &Mapper) -> String {
+pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P, mapper: &Mapper) -> Result<String, MapperError> {
     match node {
-        DynamicSqlNode::Text(content) => {
-            // 添加参数替换逻辑
-            replace_parameters(content, params)
-        },
+        DynamicSqlNode::Text(content) => replace_parameters(content, params),
+
         DynamicSqlNode::If { test, contents } => {
             if evaluate_condition(test, params) {
                 join_with_spaces(contents, params, mapper)
             } else {
-                String::new()
+                Ok(String::new())
             }
         },
+
         DynamicSqlNode::Foreach { collection, item, index, open, separator, close, contents } => {
-            // 实现foreach逻辑，同时支持两种参数类型
-            if let Some(items) = params.get_collection(collection) {
-                if items.is_empty() {
-                    return String::new();
+            let items = params.get_collection(collection)
+                .or_else(|| {
+                    params.get_param(collection).and_then(|v| {
+                        if let Value::Array(arr) = v { Some(arr) } else { None }
+                    })
+                });
+
+            let items = match items {
+                Some(arr) if !arr.is_empty() => arr,
+                _ => return Ok(String::new()),
+            };
+
+            let parent = get_parent_params(params);
+            let mut result = open.clone();
+
+            for (i, item_val) in items.iter().enumerate() {
+                if i > 0 {
+                    result.push_str(separator);
                 }
-
-                let mut result = open.clone();
-                let mut is_first = true;
-
-                // 转换params为HashMap以便传递给create_temp_params
-                let parent_params = get_parent_params(params);
-
-                for (i, item_value) in items.iter().enumerate() {
-                    if !is_first {
-                        result.push_str(separator);
-                    }
-                    is_first = false;
-
-                    // 创建临时参数，传递父参数
-                    let temp_params = create_temp_params(item, item_value, index, i, &parent_params);
-
-                    // 生成子节点SQL
-                    let item_sql = join_with_spaces(contents, &temp_params, mapper);
-                    result.push_str(&item_sql);
-                }
-
-                result.push_str(close);
-                return result;
+                let temp = create_temp_params(item, item_val, index, i, &parent);
+                result.push_str(&join_with_spaces(contents, &temp, mapper)?);
             }
 
-            // 尝试从单个值类型参数获取（兼容旧版本）
-            if let Some(Value::Array(items)) = params.get_param(collection) {
-                if items.is_empty() {
-                    return String::new();
-                }
-
-                let mut result = open.clone();
-                let mut is_first = true;
-
-                // 转换params为HashMap以便传递给create_temp_params
-                let parent_params = get_parent_params(params);
-
-                for (i, item_value) in items.iter().enumerate() {
-                    if !is_first {
-                        result.push_str(separator);
-                    }
-                    is_first = false;
-
-                    // 创建临时参数，传递父参数
-                    let temp_params = create_temp_params(item, item_value, index, i, &parent_params);
-
-                    // 生成子节点SQL
-                    let item_sql = join_with_spaces(contents, &temp_params, mapper);
-                    result.push_str(&item_sql);
-                }
-
-                result.push_str(close);
-                result
-            } else {
-                String::new()
-            }
+            result.push_str(close);
+            Ok(result)
         },
+
         DynamicSqlNode::Trim { prefix, prefix_overrides, suffix, suffix_overrides, contents } => {
-            let mut sql = join_with_spaces(contents, params, mapper);
+            let mut sql = join_with_spaces(contents, params, mapper)?;
+            sql = strip_overrides(&sql, prefix_overrides.as_deref(), None, true);
+            sql = strip_overrides(&sql, suffix_overrides.as_deref(), None, false);
 
-            // 处理prefix_overrides
-            if let Some(overrides) = prefix_overrides {
-                for override_str in overrides.split(',').map(|s| s.trim()) {
-                    if sql.starts_with(override_str) {
-                        sql = sql[override_str.len()..].trim_start().to_string();
-                        break;
-                    }
-                }
-            }
-
-            // 处理suffix_overrides
-            if let Some(overrides) = suffix_overrides {
-                for override_str in overrides.split(',').map(|s| s.trim()) {
-                    if sql.ends_with(override_str) {
-                        sql = sql[..sql.len() - override_str.len()].trim_end().to_string();
-                        break;
-                    }
-                }
-            }
-
-            // 处理prefix
             if let Some(p) = prefix {
-                if !sql.is_empty() {
-                    // 确保prefix和sql之间有空格
-                    sql = format!("{}{}{}",
-                                  p.trim_end(),
-                                  if !p.trim_end().is_empty() && !sql.trim_start().is_empty() { " " } else { "" },
-                                  sql.trim_start()
-                    );
+                if !sql.is_empty() && !p.trim_end().is_empty() {
+                    sql = format!("{} {}", p.trim_end(), sql.trim_start());
                 }
             }
-
-            // 处理suffix
             if let Some(s) = suffix {
-                if !sql.is_empty() {
-                    // 确保sql和suffix之间有空格
-                    sql = format!("{}{}{}",
-                                  sql.trim_end(),
-                                  if !sql.trim_end().is_empty() && !s.trim_start().is_empty() { " " } else { "" },
-                                  s.trim_start()
-                    );
+                if !sql.is_empty() && !s.trim_start().is_empty() {
+                    sql = format!("{} {}", sql.trim_end(), s.trim_start());
                 }
             }
 
-            sql
+            Ok(sql)
         },
+
         DynamicSqlNode::Choose { whens, otherwise } => {
-            // 尝试匹配第一个满足条件的when
             for (condition, contents) in whens {
                 if evaluate_condition(condition, params) {
                     return join_with_spaces(contents, params, mapper);
                 }
             }
-
-            // 如果没有when条件满足，使用otherwise
-            if let Some(contents) = otherwise {
-                join_with_spaces(contents, params, mapper)
-            } else {
-                String::new()
+            match otherwise {
+                Some(contents) => join_with_spaces(contents, params, mapper),
+                None => Ok(String::new()),
             }
         },
-        DynamicSqlNode::Bind { name:_, value: _value } => {
-            // Bind节点只是绑定变量，不生成SQL
-            String::new()
-        },
+
+        DynamicSqlNode::Bind { .. } => Ok(String::new()), // 在 join_with_spaces 中处理
+
         DynamicSqlNode::Include { ref_id } => {
-            // 添加调试信息
-            //println!("处理Include标签，ref_id: {}, sql_fragments: {:?}", ref_id, mapper.sql_fragments.keys());
-
-            // 查找对应的SQL片段
-            if let Some(fragment) = mapper.sql_fragments.get(ref_id) {
-                //println!("找到SQL片段，内容: {:?}", fragment);
-
-                // 直接处理SQL片段中的Text节点
-                let result: String = fragment.iter()
-                    .filter_map(|node| match node {
-                        DynamicSqlNode::Text(text) => Some(text.clone()),
-                        _ => {
-                            // 对于非Text节点，使用generate_sql处理
-                            let sql = generate_sql(node, params, mapper);
-                            if !sql.trim().is_empty() { Some(sql) } else { None }
-                        }
-                    })
-                    .collect::<Vec<String>>()
-                    .join(" ");
-
-                //println!("处理后的SQL片段结果: {}", result);
-                result
+            // 支持 namespace.id 跨文件引用格式
+            let fragment = if ref_id.contains('.') {
+                let (_ns, id) = ref_id.split_once('.')
+                    .ok_or_else(|| MapperError::MissingFragment { ref_id: ref_id.clone() })?;
+                // 当前仅支持同 mapper 内查找（跨 mapper 需要外部注册）
+                mapper.sql_fragments.get(id)
+                    .ok_or_else(|| MapperError::MissingFragment { ref_id: ref_id.clone() })?
             } else {
-                //println!("警告：未找到SQL片段: {}", ref_id);
-                String::new()
-            }
+                mapper.sql_fragments.get(ref_id)
+                    .ok_or_else(|| MapperError::MissingFragment { ref_id: ref_id.clone() })?
+            };
+
+            let parts: Vec<String> = fragment.iter()
+                .map(|node| generate_sql(node, params, mapper))
+                .filter(|s| s.as_ref().map(|sql| !sql.trim().is_empty()).unwrap_or(false))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok(parts.join(" "))
         },
+
         DynamicSqlNode::Where { prefix_overrides, suffix_overrides, contents } => {
-            // Where节点的处理逻辑，类似于Trim但有特定的默认值
-            let mut sql = join_with_spaces(contents, params, mapper);
+            let sql = join_with_spaces(contents, params, mapper)?;
+            let sql = strip_overrides(&sql, prefix_overrides.as_deref(), Some("AND |OR "), true);
+            let sql = strip_overrides(&sql, suffix_overrides.as_deref(), None, false);
 
-            // 处理prefix_overrides，默认值为"AND |OR "
-            let effective_prefix_overrides = prefix_overrides.as_deref().unwrap_or("AND |OR ");
-            for override_str in effective_prefix_overrides.split('|').map(|s| s.trim()) {
-                if sql.starts_with(override_str) {
-                    sql = sql[override_str.len()..].trim_start().to_string();
-                    break;
-                }
-            }
-
-            // 处理suffix_overrides
-            if let Some(overrides) = suffix_overrides {
-                for override_str in overrides.split(',').map(|s| s.trim()) {
-                    if sql.ends_with(override_str) {
-                        sql = sql[..sql.len() - override_str.len()].trim_end().to_string();
-                        break;
-                    }
-                }
-            }
-
-            // 如果sql不为空，添加WHERE前缀
-            if !sql.is_empty() {
-                // 确保WHERE和sql之间有空格
-                format!("WHERE {}", sql.trim_start())
+            if sql.is_empty() {
+                Ok(String::new())
             } else {
-                String::new()
+                Ok(format!("WHERE {}", sql.trim_start()))
             }
         },
-        // 添加Set节点处理逻辑
+
         DynamicSqlNode::Set { prefix_overrides, suffix_overrides, contents } => {
-            // Set节点的处理逻辑，类似于Trim但有特定的默认值
-            let mut sql = join_with_spaces(contents, params, mapper);
+            let sql = join_with_spaces(contents, params, mapper)?;
+            let sql = strip_overrides(&sql, prefix_overrides.as_deref(), None, true);
+            let sql = strip_overrides(&sql, suffix_overrides.as_deref(), Some(","), false);
 
-            // 处理prefix_overrides
-            if let Some(overrides) = prefix_overrides {
-                for override_str in overrides.split('|').map(|s| s.trim()) {
-                    if sql.starts_with(override_str) {
-                        sql = sql[override_str.len()..].trim_start().to_string();
-                        break;
-                    }
-                }
+            if sql.is_empty() {
+                Ok(String::new())
+            } else {
+                Ok(format!("SET {}", sql.trim_start()))
             }
+        },
 
-            // 处理suffix_overrides，默认值为","（去除结尾的逗号）
-            let effective_suffix_overrides = suffix_overrides.as_deref().unwrap_or(",");
-            for override_str in effective_suffix_overrides.split('|').map(|s| s.trim()) {
-                if sql.ends_with(override_str) {
-                    sql = sql[..sql.len() - override_str.len()].trim_end().to_string();
-                    break;
-                }
-            }
-
-            // 处理prefix，默认值为"SET"
-            if !sql.is_empty() {
-                sql = format!("SET {}", sql.trim_start());
-            }
-
-            sql
+        DynamicSqlNode::Mixed { contents } => {
+            join_with_spaces(contents, params, mapper)
         },
     }
 }
 
-// 泛型版本的evaluate_condition函数
-fn evaluate_condition<P: ParamsAccess>(condition: &str, params: &P) -> bool {
-    // 使用parser中的KeyValue解析条件
-    let kvs = super::parser::KeyValue::parse_conditions(condition).unwrap_or_default();
+// ─── 高层便捷 API ─────────────────────────────────────────────────
 
-    // 检查所有条件是否都满足
-    kvs.iter().all(|kv| {
-        match params.get_param(&kv.key) {
-            Some(value) => {
-                // 处理各种比较操作符
-                match kv.condition.as_str() {
-                    "=" | "==" => {
-                        if kv.value == "null" {
-                            return false; // 不等于null
-                        } else if kv.value.starts_with('\'') && kv.value.ends_with('\'') {
-                            let str_value = kv.value.trim_matches('\'');
-                            if let Value::String(s) = value {
-                                return s == str_value;
-                            }
-                        } else if let Ok(num_value) = kv.value.parse::<i64>() {
-                            if let Value::Number(n) = value {
-                                if let Some(n_int) = n.as_i64() {
-                                    return n_int == num_value;
-                                }
-                            }
-                        }
-                        false
-                    },
-                    "!=" => {
-                        if kv.value == "null" {
-                            return true; // 不为null
-                        } else if kv.value.starts_with('\'') && kv.value.ends_with('\'') {
-                            let str_value = kv.value.trim_matches('\'');
-                            if let Value::String(s) = value {
-                                return s != str_value;
-                            }
-                        } else if let Ok(num_value) = kv.value.parse::<i64>() {
-                            if let Value::Number(n) = value {
-                                if let Some(n_int) = n.as_i64() {
-                                    return n_int != num_value;
-                                }
-                            }
-                        }
-                        true // 默认返回true表示条件成立
-                    },
-                    ">" => {
-                        if let Ok(num_value) = kv.value.parse::<i64>() {
-                            if let Value::Number(n) = value {
-                                if let Some(n_int) = n.as_i64() {
-                                    return n_int > num_value;
-                                }
-                            }
-                        }
-                        false
-                    },
-                    "<" => {
-                        if let Ok(num_value) = kv.value.parse::<i64>() {
-                            if let Value::Number(n) = value {
-                                if let Some(n_int) = n.as_i64() {
-                                    return n_int < num_value;
-                                }
-                            }
-                        }
-                        false
-                    },
-                    ">=" => {
-                        if let Ok(num_value) = kv.value.parse::<i64>() {
-                            if let Value::Number(n) = value {
-                                if let Some(n_int) = n.as_i64() {
-                                    return n_int >= num_value;
-                                }
-                            }
-                        }
-                        false
-                    },
-                    "<=" => {
-                        if let Ok(num_value) = kv.value.parse::<i64>() {
-                            if let Value::Number(n) = value {
-                                if let Some(n_int) = n.as_i64() {
-                                    return n_int <= num_value;
-                                }
-                            }
-                        }
-                        false
-                    },
-                    _ => false
-                }
-            },
+impl Mapper {
+    /// 一站式 SQL 生成：按 statement id 查找并生成最终 SQL
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let mut parser = MyBatisXmlParser::new(xml);
+    /// let mapper = parser.parse_mapper()?;
+    /// let mut params = HashMap::new();
+    /// params.insert("id".to_string(), Value::Number(1.into()));
+    /// let sql = mapper.build_sql("findUserById", &params)?;
+    /// ```
+    pub fn build_sql(&self, statement_id: &str, params: &HashMap<String, Value>) -> Result<String, MapperError> {
+        let stmt = self.statements.get(statement_id)
+            .ok_or_else(|| MapperError::StatementNotFound { id: statement_id.to_string() })?;
+
+        match &stmt.dynamic_sql {
+            Some(node) => generate_sql(node, params, self),
             None => {
-                // 参数不存在，检查是否是与null的比较
-                // 参数不存在时，参数 == null 条件返回true，其他条件返回false
-                kv.condition == "=" && kv.value == "null"
+                // 纯静态SQL，仅做参数替换
+                replace_parameters(&stmt.sql, params)
             }
         }
-    })
+    }
 }

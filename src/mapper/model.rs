@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 
 /// MyBatis映射文件模型
 #[derive(Debug, Default)]
@@ -11,6 +12,60 @@ pub struct Mapper {
     pub result_maps: HashMap<String, ResultMap>,
     /// SQL片段映射
     pub sql_fragments: HashMap<String, Vec<DynamicSqlNode>>,
+}
+
+/// MyBatis映射器结构化错误类型
+#[derive(Debug)]
+pub enum MapperError {
+    /// XML解析错误
+    ParseError { message: String },
+    /// 参数缺失
+    MissingParam { param: String, context: String },
+    /// SQL片段引用不存在
+    MissingFragment { ref_id: String },
+    /// 条件表达式无效
+    InvalidCondition { expr: String, reason: String },
+    /// 语句不存在
+    StatementNotFound { id: String },
+    /// SQL生成错误
+    SqlGenerationError { message: String },
+}
+
+impl fmt::Display for MapperError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MapperError::ParseError { message } => write!(f, "XML解析错误: {}", message),
+            MapperError::MissingParam { param, context } => {
+                write!(f, "参数 '{}' 不存在 ({})", param, context)
+            },
+            MapperError::MissingFragment { ref_id } => {
+                write!(f, "SQL片段 '{}' 不存在", ref_id)
+            },
+            MapperError::InvalidCondition { expr, reason } => {
+                write!(f, "无效条件 '{}': {}", expr, reason)
+            },
+            MapperError::StatementNotFound { id } => {
+                write!(f, "语句 '{}' 不存在", id)
+            },
+            MapperError::SqlGenerationError { message } => {
+                write!(f, "SQL生成错误: {}", message)
+            },
+        }
+    }
+}
+
+impl std::error::Error for MapperError {}
+
+impl From<quick_xml::Error> for MapperError {
+    fn from(e: quick_xml::Error) -> Self {
+        MapperError::ParseError { message: e.to_string() }
+    }
+}
+
+impl From<std::str::Utf8Error> for MapperError {
+    fn from(e: std::str::Utf8Error) -> Self {
+        MapperError::ParseError { message: e.to_string() }
+    }
 }
 
 /// SQL语句类型
@@ -102,16 +157,18 @@ pub enum DynamicSqlNode {
     Include {
         ref_id: String,
     },
-    // 添加Where节点类型，类似于Trim但有默认的prefix和suffix处理
     Where {
         prefix_overrides: Option<String>,
         suffix_overrides: Option<String>,
         contents: Vec<DynamicSqlNode>,
     },
-    // 添加Set节点类型，类似于Trim但有默认的prefix和suffix_overrides处理
     Set {
         prefix_overrides: Option<String>,
         suffix_overrides: Option<String>,
+        contents: Vec<DynamicSqlNode>,
+    },
+    /// 混合内容容器：包含多个动态SQL节点的序列
+    Mixed {
         contents: Vec<DynamicSqlNode>,
     },
 }

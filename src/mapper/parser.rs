@@ -1,13 +1,32 @@
 use quick_xml::Reader;
 use quick_xml::events::Event;
+use quick_xml::events::BytesStart;
 use super::model::*;
-use std::error::Error;
 use std::io::Cursor;
 
 /// MyBatis XML解析器
 pub struct MyBatisXmlParser {
     reader: Reader<Cursor<Vec<u8>>>,
     buf: Vec<u8>,
+}
+
+/// 从XML标签中按名称查找属性值
+fn get_attr(e: &BytesStart, name: &[u8], err_msg: &str) -> Result<String, MapperError> {
+    let attr = e.attributes()
+        .find(|a| a.as_ref().map(|a| a.key.as_ref() == name).unwrap_or(false))
+        .ok_or_else(|| MapperError::ParseError { message: err_msg.to_string() })?
+        .map_err(|e| MapperError::ParseError { message: e.to_string() })?;
+    Ok(std::str::from_utf8(&attr.value)?.to_string())
+}
+
+/// 获取可选属性，空字符串视为 None
+fn get_optional_attr(e: &BytesStart, name: &[u8]) -> Option<String> {
+    get_attr(e, name, "").ok().filter(|s| !s.is_empty())
+}
+
+/// 字节切片转字符串
+fn bytes_to_str(bytes: &[u8]) -> Result<String, MapperError> {
+    Ok(std::str::from_utf8(bytes)?.to_string())
 }
 
 impl MyBatisXmlParser {
@@ -18,11 +37,7 @@ impl MyBatisXmlParser {
 
     /// 从字节切片创建解析器
     pub fn new_from_bytes(xml_bytes: &[u8]) -> Self {
-        let vec_bytes = xml_bytes.to_vec();
-        let cursor = Cursor::new(vec_bytes);
-
-        let reader = Reader::from_reader(cursor);
-
+        let reader = Reader::from_reader(Cursor::new(xml_bytes.to_vec()));
         MyBatisXmlParser {
             reader,
             buf: Vec::new(),
@@ -30,7 +45,7 @@ impl MyBatisXmlParser {
     }
 
     /// 解析mapper文件
-    pub fn parse_mapper(&mut self) -> Result<Mapper, Box<dyn Error>> {
+    pub fn parse_mapper(&mut self) -> Result<Mapper, MapperError> {
         let mut mapper = Mapper::default();
         let mut in_mapper = false;
 
@@ -39,51 +54,40 @@ impl MyBatisXmlParser {
                 Ok(Event::Start(e)) => match e.name().as_ref() {
                     b"mapper" => {
                         in_mapper = true;
-                        // 解析namespace属性
-                        if let Some(ns_attr) = e.attributes().find(|a| {
-                            a.as_ref().unwrap().key.as_ref() == b"namespace"
-                        }) {
-                            let attr = ns_attr.unwrap();
-                            let ns = std::str::from_utf8(&attr.value)?;
-                            mapper.namespace = ns.to_string();
+                        if let Ok(ns) = get_attr(&e, b"namespace", "<mapper>缺少namespace属性") {
+                            mapper.namespace = ns;
                         }
                     },
                     b"select" if in_mapper => {
-                        let e = e.into_owned(); // 将借用事件转换为所有权模式
+                        let e = e.into_owned();
                         let stmt = self.parse_sql_statement(StatementType::Select, &e)?;
                         mapper.statements.insert(stmt.id.clone(), stmt);
                     },
                     b"insert" if in_mapper => {
-                        let e = e.into_owned(); // 将借用事件转换为所有权模式
+                        let e = e.into_owned();
                         let stmt = self.parse_sql_statement(StatementType::Insert, &e)?;
                         mapper.statements.insert(stmt.id.clone(), stmt);
                     },
                     b"update" if in_mapper => {
-                        let e = e.into_owned(); // 将借用事件转换为所有权模式
+                        let e = e.into_owned();
                         let stmt = self.parse_sql_statement(StatementType::Update, &e)?;
                         mapper.statements.insert(stmt.id.clone(), stmt);
                     },
                     b"delete" if in_mapper => {
-                        let e = e.into_owned(); // 将借用事件转换为所有权模式
+                        let e = e.into_owned();
                         let stmt = self.parse_sql_statement(StatementType::Delete, &e)?;
                         mapper.statements.insert(stmt.id.clone(), stmt);
                     },
                     b"resultMap" if in_mapper => {
-                        let e = e.into_owned(); // 将借用事件转换为所有权模式
+                        let e = e.into_owned();
                         let result_map = self.parse_result_map(&e)?;
                         mapper.result_maps.insert(result_map.id.clone(), result_map);
                     },
                     b"sql" if in_mapper => {
                         let e = e.into_owned();
-                        let sql_id = e.attributes().find(|a| {
-                            a.as_ref().unwrap().key.as_ref() == b"id"
-                        }).ok_or("sql标签缺少id属性")?.unwrap();
-                        let id = std::str::from_utf8(&sql_id.value)?.to_string();
-
+                        let id = get_attr(&e, b"id", "<sql>标签缺少id属性")?;
                         let mut contents = Vec::new();
                         self.parse_sql_content(&mut String::new(), &mut contents)?;
-                        // 添加调试信息
-                        //println!("{}:{} 解析SQL片段: {}, 内容: {:?}", file!(), line!(), id, contents);
                         mapper.sql_fragments.insert(id, contents);
                     },
                     _ => {}
@@ -94,7 +98,7 @@ impl MyBatisXmlParser {
                     }
                 },
                 Ok(Event::Eof) => break,
-                Err(e) => return Err(Box::new(e)),
+                Err(e) => return Err(MapperError::from(e)),
                 _ => {}
             }
         }
@@ -103,268 +107,66 @@ impl MyBatisXmlParser {
     }
 
     /// 解析SQL语句
-    fn parse_sql_statement(&mut self, stmt_type: StatementType, start_event: &quick_xml::events::BytesStart)
-                           -> Result<SqlStatement, Box<dyn Error>> {
+    fn parse_sql_statement(&mut self, stmt_type: StatementType, start_event: &BytesStart)
+                           -> Result<SqlStatement, MapperError> {
         let mut stmt = SqlStatement {
             stmt_type: Some(stmt_type),
             ..Default::default()
         };
 
-        // 解析属性
         for attr in start_event.attributes() {
-            let attr = attr?;
+            let attr = attr.map_err(|e| MapperError::ParseError { message: e.to_string() })?;
             match attr.key.as_ref() {
-                b"id" => stmt.id = std::str::from_utf8(&attr.value)?.to_string(),
-                b"parameterType" => stmt.parameter_type = Some(std::str::from_utf8(&attr.value)?.to_string()),
-                b"resultType" => stmt.result_type = Some(std::str::from_utf8(&attr.value)?.to_string()),
-                b"resultMap" => stmt.result_map = Some(std::str::from_utf8(&attr.value)?.to_string()),
+                b"id" => stmt.id = bytes_to_str(&attr.value)?,
+                b"parameterType" => stmt.parameter_type = Some(bytes_to_str(&attr.value)?),
+                b"resultType" => stmt.result_type = Some(bytes_to_str(&attr.value)?),
+                b"resultMap" => stmt.result_map = Some(bytes_to_str(&attr.value)?),
                 _ => {}
             }
         }
 
-        // 解析SQL内容和动态SQL
         let mut sql_buffer = String::new();
         let mut dynamic_nodes = Vec::new();
-        //println!("{}:{} self.buf:{:?}", file!(), line!(), String::from_utf8_lossy(&self.buf));
-
         self.parse_sql_content(&mut sql_buffer, &mut dynamic_nodes)?;
-
-        //println!("{}:{} dynamic_nodes:{:?}", file!(), line!(), dynamic_nodes);
 
         stmt.sql = sql_buffer;
         if !dynamic_nodes.is_empty() {
-            // 如果有多个节点，用Text包裹
             if dynamic_nodes.len() == 1 {
                 stmt.dynamic_sql = dynamic_nodes.into_iter().next();
             } else {
-                stmt.dynamic_sql = Some(DynamicSqlNode::Trim {
-                    prefix: None,
-                    prefix_overrides: None,
-                    suffix: None,
-                    suffix_overrides: None,
+                stmt.dynamic_sql = Some(DynamicSqlNode::Mixed {
                     contents: dynamic_nodes,
                 });
             }
         }
 
-        // 提取参数
-        stmt.parameters = self.extract_parameters(&stmt.sql);
+        stmt.parameters = Self::extract_parameters(&stmt.sql);
 
         Ok(stmt)
     }
 
     /// 解析SQL内容和动态SQL节点
     fn parse_sql_content(&mut self, sql_buffer: &mut String, dynamic_nodes: &mut Vec<DynamicSqlNode>)
-                         -> Result<(), Box<dyn Error>> {
+                         -> Result<(), MapperError> {
         loop {
             match self.reader.read_event_into(&mut self.buf) {
-                Ok(Event::Start(e)) => match e.name().as_ref() {
-                    b"if" => {
-                        let test_attr = e.attributes().find(|a| {
-                            a.as_ref().unwrap().key.as_ref() == b"test"
-                        }).ok_or("if标签缺少test属性")?;
-                        let test = std::str::from_utf8(&test_attr.unwrap().value)?.to_string();
-                        let test = test.trim().to_string();
-
-                        let mut contents = Vec::new();
-                        self.parse_sql_content(&mut String::new(), &mut contents)?;
-                        dynamic_nodes.push(DynamicSqlNode::If {
-                            test,
-                            contents,
-                        });
-                    },
-                    b"include" => {
-                        let ref_id_attr = e.attributes().find(|a| {
-                            a.as_ref().unwrap().key.as_ref() == b"refid"
-                        }).ok_or("include标签缺少refid属性")?;
-                        let ref_id = std::str::from_utf8(&ref_id_attr.unwrap().value)?.to_string();
-
-                        dynamic_nodes.push(DynamicSqlNode::Include {
-                            ref_id,
-                        });
-                        //println!("{}:{} dynamic_nodes:{:?}", file!(), line!(), dynamic_nodes);
-                        // 跳过include标签的结束标签
-                        self.reader.read_event_into(&mut self.buf)?;
-                    },
-                    b"foreach" => {
-                        // 解析foreach属性
-                        let mut collection = String::new();
-                        let mut item = String::new();
-                        let mut index = None;
-                        let mut open = String::new();
-                        let mut separator = String::new();
-                        let mut close = String::new();
-
-                        for attr in e.attributes() {
-                            let attr = attr?;
-                            match attr.key.as_ref() {
-                                b"collection" => collection = std::str::from_utf8(&attr.value)?.to_string(),
-                                b"item" => item = std::str::from_utf8(&attr.value)?.to_string(),
-                                b"index" => index = Some(std::str::from_utf8(&attr.value)?.to_string()),
-                                b"open" => open = std::str::from_utf8(&attr.value)?.to_string(),
-                                b"separator" => separator = std::str::from_utf8(&attr.value)?.to_string(),
-                                b"close" => close = std::str::from_utf8(&attr.value)?.to_string(),
-                                _ => {}
-                            }
-                        }
-
-                        let mut contents = Vec::new();
-                        self.parse_sql_content(&mut String::new(), &mut contents)?;
-                        dynamic_nodes.push(DynamicSqlNode::Foreach {
-                            collection,
-                            item,
-                            index,
-                            open,
-                            separator,
-                            close,
-                            contents,
-                        });
-                    },
-                    b"where" => {
-                        // 解析where标签
-                        let mut prefix_overrides = None;
-                        let mut suffix_overrides = None;
-
-                        // 解析where标签的属性
-                        for attr in e.attributes() {
-                            let attr = attr?;
-                            match attr.key.as_ref() {
-                                b"prefixOverrides" => prefix_overrides = Some(std::str::from_utf8(&attr.value)?.to_string()),
-                                b"suffixOverrides" => suffix_overrides = Some(std::str::from_utf8(&attr.value)?.to_string()),
-                                _ => {}
-                            }
-                        }
-
-                        let mut contents = Vec::new();
-                        self.parse_sql_content(&mut String::new(), &mut contents)?;
-                        dynamic_nodes.push(DynamicSqlNode::Where {
-                            prefix_overrides,
-                            suffix_overrides,
-                            contents,
-                        });
-                    },
-                    // 添加trim标签解析逻辑
-                    b"trim" => {
-                        // 解析trim标签属性
-                        let mut prefix = None;
-                        let mut prefix_overrides = None;
-                        let mut suffix = None;
-                        let mut suffix_overrides = None;
-
-                        // 解析trim标签的所有属性
-                        for attr in e.attributes() {
-                            let attr = attr?;
-                            match attr.key.as_ref() {
-                                b"prefix" => prefix = Some(std::str::from_utf8(&attr.value)?.to_string()),
-                                b"prefixOverrides" => prefix_overrides = Some(std::str::from_utf8(&attr.value)?.to_string()),
-                                b"suffix" => suffix = Some(std::str::from_utf8(&attr.value)?.to_string()),
-                                b"suffixOverrides" => suffix_overrides = Some(std::str::from_utf8(&attr.value)?.to_string()),
-                                _ => {}
-                            }
-                        }
-
-                        // 解析trim标签的内容
-                        let mut contents = Vec::new();
-                        self.parse_sql_content(&mut String::new(), &mut contents)?;
-
-                        // 创建Trim类型的动态SQL节点
-                        dynamic_nodes.push(DynamicSqlNode::Trim {
-                            prefix,
-                            prefix_overrides,
-                            suffix,
-                            suffix_overrides,
-                            contents,
-                        });
-                    },
-                    // 添加set标签解析逻辑
-                    b"set" => {
-                        // 解析set标签属性
-                        let mut prefix_overrides = None;
-                        let mut suffix_overrides = None;
-
-                        // 解析set标签的属性
-                        for attr in e.attributes() {
-                            let attr = attr?;
-                            match attr.key.as_ref() {
-                                b"prefixOverrides" => prefix_overrides = Some(std::str::from_utf8(&attr.value)?.to_string()),
-                                b"suffixOverrides" => suffix_overrides = Some(std::str::from_utf8(&attr.value)?.to_string()),
-                                _ => {}
-                            }
-                        }
-
-                        let mut contents = Vec::new();
-                        self.parse_sql_content(&mut String::new(), &mut contents)?;
-                        dynamic_nodes.push(DynamicSqlNode::Set {
-                            prefix_overrides,
-                            suffix_overrides,
-                            contents,
-                        });
-                    },
-                    b"choose" => {
-                        let mut whens = Vec::new();
-                        let mut otherwise = None;
-
-                        loop {
-                            match self.reader.read_event_into(&mut self.buf) {
-                                Ok(Event::Start(e)) => match e.name().as_ref() {
-                                    b"when" => {
-                                        let test_attr = e.attributes().find(|a| {
-                                            a.as_ref().unwrap().key.as_ref() == b"test"
-                                        }).ok_or("when标签缺少test属性")?;
-                                        let test = std::str::from_utf8(&test_attr.unwrap().value)?.to_string();
-                                        let test = test.trim().to_string();
-
-                                        let mut contents = Vec::new();
-                                        self.parse_sql_content(&mut String::new(), &mut contents)?;
-                                        whens.push((test, contents));
-                                    },
-                                    b"otherwise" => {
-                                        let mut contents = Vec::new();
-                                        self.parse_sql_content(&mut String::new(), &mut contents)?;
-                                        otherwise = Some(contents);
-                                    },
-                                    _ => break
-                                },
-                                Ok(Event::End(_)) => break,
-                                Ok(Event::Eof) => break,
-                                Err(e) => return Err(Box::new(e)),
-                                _ => {}
-                            }
-                        }
-
-                        dynamic_nodes.push(DynamicSqlNode::Choose {
-                            whens,
-                            otherwise
-                        });
-                    },
-                    // 处理其他动态SQL标签...
-                    _ => {
-                        // 未知标签，作为普通文本处理
-                        sql_buffer.push_str(&format!("<{}/>", std::str::from_utf8(e.name().as_ref())?.to_string()));
-                    }
+                Ok(Event::Start(e)) => {
+                    let owned = e.into_owned();
+                    self.handle_dynamic_tag(&owned, sql_buffer, dynamic_nodes, true)?;
+                },
+                Ok(Event::Empty(e)) => {
+                    let owned = e.into_owned();
+                    self.handle_dynamic_tag(&owned, sql_buffer, dynamic_nodes, false)?;
                 },
                 Ok(Event::Text(t)) => {
-                    // 不使用标准的text_to_string方法，而是直接获取原始字节并转换为字符串
-                    // 这样可以保留XML实体引用
-                    let text = if let Ok(text) = std::str::from_utf8(&t) {
-                        text.to_string()
-                    } else {
-                        "".to_string()
-                    };
-
+                    let text = bytes_to_str(&t)?;
                     sql_buffer.push_str(&text);
                     if !text.trim().is_empty() {
                         dynamic_nodes.push(DynamicSqlNode::Text(text));
                     }
                 },
-                // 在parse_sql_content函数中，增加对CDATA的处理
                 Ok(Event::CData(t)) => {
-                    let text = if let Ok(text) = std::str::from_utf8(&t) {
-                        text.to_string()
-                    } else {
-                        "".to_string()
-                    };
-
+                    let text = bytes_to_str(&t)?;
                     sql_buffer.push_str(&text);
                     if !text.trim().is_empty() {
                         dynamic_nodes.push(DynamicSqlNode::Text(text));
@@ -372,7 +174,7 @@ impl MyBatisXmlParser {
                 },
                 Ok(Event::End(_)) => break,
                 Ok(Event::Eof) => break,
-                Err(e) => return Err(Box::new(e)),
+                Err(e) => return Err(MapperError::from(e)),
                 _ => {}
             }
         }
@@ -380,22 +182,146 @@ impl MyBatisXmlParser {
         Ok(())
     }
 
-    /// 解析结果映射
-    fn parse_result_map(&mut self, start_event: &quick_xml::events::BytesStart)
-                        -> Result<ResultMap, Box<dyn Error>> {
-        let mut result_map = ResultMap::default();
+    /// 处理动态SQL标签（同时支持 Start 有内容 和 Empty 自闭合两种情况）
+    /// has_body: true 表示有子内容需要递归解析，false 表示自闭合（内容为空）
+    fn handle_dynamic_tag(
+        &mut self,
+        e: &BytesStart,
+        _sql_buffer: &mut String,
+        dynamic_nodes: &mut Vec<DynamicSqlNode>,
+        has_body: bool,
+    ) -> Result<(), MapperError> {
+        let mut parse_contents = || -> Result<Vec<DynamicSqlNode>, MapperError> {
+            if has_body {
+                let mut contents = Vec::new();
+                self.parse_sql_content(&mut String::new(), &mut contents)?;
+                Ok(contents)
+            } else {
+                Ok(Vec::new())
+            }
+        };
 
-        // 解析属性
-        for attr in start_event.attributes() {
-            let attr = attr?;
-            match attr.key.as_ref() {
-                b"id" => result_map.id = std::str::from_utf8(&attr.value)?.to_string(),
-                b"type" => result_map.type_name = std::str::from_utf8(&attr.value)?.to_string(),
+        match e.name().as_ref() {
+            b"if" => {
+                let test = get_attr(e, b"test", "<if>标签缺少test属性")?.trim().to_string();
+                let contents = parse_contents()?;
+                dynamic_nodes.push(DynamicSqlNode::If { test, contents });
+            },
+            b"bind" => {
+                let name = get_attr(e, b"name", "<bind>标签缺少name属性")?;
+                let value = get_attr(e, b"value", "<bind>标签缺少value属性")?;
+                dynamic_nodes.push(DynamicSqlNode::Bind { name, value });
+            },
+            b"include" => {
+                let ref_id = get_attr(e, b"refid", "<include>标签缺少refid属性")?;
+                dynamic_nodes.push(DynamicSqlNode::Include { ref_id });
+            },
+            b"foreach" => {
+                let collection = get_attr(e, b"collection", "<foreach>标签缺少collection属性")?;
+                let item = get_attr(e, b"item", "<foreach>标签缺少item属性")?;
+                let index = get_optional_attr(e, b"index");
+                let open = get_attr(e, b"open", "").unwrap_or_default();
+                let separator = get_attr(e, b"separator", "").unwrap_or_default();
+                let close = get_attr(e, b"close", "").unwrap_or_default();
+                let contents = parse_contents()?;
+                dynamic_nodes.push(DynamicSqlNode::Foreach {
+                    collection, item, index, open, separator, close, contents,
+                });
+            },
+            b"where" => {
+                let prefix_overrides = get_optional_attr(e, b"prefixOverrides");
+                let suffix_overrides = get_optional_attr(e, b"suffixOverrides");
+                let contents = parse_contents()?;
+                dynamic_nodes.push(DynamicSqlNode::Where {
+                    prefix_overrides, suffix_overrides, contents,
+                });
+            },
+            b"trim" => {
+                let prefix = get_optional_attr(e, b"prefix");
+                let prefix_overrides = get_optional_attr(e, b"prefixOverrides");
+                let suffix = get_optional_attr(e, b"suffix");
+                let suffix_overrides = get_optional_attr(e, b"suffixOverrides");
+                let contents = parse_contents()?;
+                dynamic_nodes.push(DynamicSqlNode::Trim {
+                    prefix, prefix_overrides, suffix, suffix_overrides, contents,
+                });
+            },
+            b"set" => {
+                let prefix_overrides = get_optional_attr(e, b"prefixOverrides");
+                let suffix_overrides = get_optional_attr(e, b"suffixOverrides");
+                let contents = parse_contents()?;
+                dynamic_nodes.push(DynamicSqlNode::Set {
+                    prefix_overrides, suffix_overrides, contents,
+                });
+            },
+            b"choose" => {
+                if has_body {
+                    let (whens, otherwise) = self.parse_choose()?;
+                    dynamic_nodes.push(DynamicSqlNode::Choose { whens, otherwise });
+                }
+                // 自闭合的choose无意义，忽略
+            },
+            _ => {
+                // 未知标签，跳过（有body时需要跳过子树）
+                if has_body {
+                    self.skip_element()?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 解析choose标签内部结构
+    fn parse_choose(&mut self) -> Result<(Vec<(String, Vec<DynamicSqlNode>)>, Option<Vec<DynamicSqlNode>>), MapperError> {
+        let mut whens = Vec::new();
+        let mut otherwise = None;
+
+        loop {
+            match self.reader.read_event_into(&mut self.buf) {
+                Ok(Event::Start(e)) => match e.name().as_ref() {
+                    b"when" => {
+                        let test = get_attr(&e, b"test", "<when>标签缺少test属性")?.trim().to_string();
+                        let mut contents = Vec::new();
+                        self.parse_sql_content(&mut String::new(), &mut contents)?;
+                        whens.push((test, contents));
+                    },
+                    b"otherwise" => {
+                        let mut contents = Vec::new();
+                        self.parse_sql_content(&mut String::new(), &mut contents)?;
+                        otherwise = Some(contents);
+                    },
+                    _ => {
+                        self.skip_element()?;
+                    }
+                },
+                Ok(Event::End(e)) => {
+                    if e.name().as_ref() == b"choose" {
+                        break;
+                    }
+                },
+                Ok(Event::Eof) => break,
+                Err(e) => return Err(MapperError::from(e)),
                 _ => {}
             }
         }
 
-        // 解析result子节点
+        Ok((whens, otherwise))
+    }
+
+    /// 解析结果映射
+    fn parse_result_map(&mut self, start_event: &BytesStart) -> Result<ResultMap, MapperError> {
+        let mut result_map = ResultMap::default();
+
+        for attr in start_event.attributes() {
+            let attr = attr.map_err(|e| MapperError::ParseError { message: e.to_string() })?;
+            match attr.key.as_ref() {
+                b"id" => result_map.id = bytes_to_str(&attr.value)?,
+                b"type" => result_map.type_name = bytes_to_str(&attr.value)?,
+                _ => {}
+            }
+        }
+
         loop {
             match self.reader.read_event_into(&mut self.buf) {
                 Ok(Event::Start(e)) => match e.name().as_ref() {
@@ -406,31 +332,24 @@ impl MyBatisXmlParser {
                             java_type: None,
                             jdbc_type: None,
                         };
-
                         for attr in e.attributes() {
-                            let attr = attr?;
+                            let attr = attr.map_err(|e| MapperError::ParseError { message: e.to_string() })?;
                             match attr.key.as_ref() {
-                                b"property" => column.property = std::str::from_utf8(&attr.value)?.to_string(),
-                                b"column" => column.column = std::str::from_utf8(&attr.value)?.to_string(),
-                                b"javaType" => column.java_type = Some(std::str::from_utf8(&attr.value)?.to_string()),
-                                b"jdbcType" => column.jdbc_type = Some(std::str::from_utf8(&attr.value)?.to_string()),
+                                b"property" => column.property = bytes_to_str(&attr.value)?,
+                                b"column" => column.column = bytes_to_str(&attr.value)?,
+                                b"javaType" => column.java_type = Some(bytes_to_str(&attr.value)?),
+                                b"jdbcType" => column.jdbc_type = Some(bytes_to_str(&attr.value)?),
                                 _ => {}
                             }
                         }
-
                         result_map.result_columns.push(column);
-                        // 消耗结束标签
                         self.reader.read_event_into(&mut self.buf)?;
                     },
-                    // 处理其他resultMap子标签...
-                    _ => {
-                        // 跳过未知标签
-                        self.skip_element()?;
-                    }
+                    _ => { self.skip_element()?; }
                 },
                 Ok(Event::End(_)) => break,
                 Ok(Event::Eof) => break,
-                Err(e) => return Err(Box::new(e)),
+                Err(e) => return Err(MapperError::from(e)),
                 _ => {}
             }
         }
@@ -438,13 +357,14 @@ impl MyBatisXmlParser {
         Ok(result_map)
     }
 
-    /// 提取SQL中的参数
-    fn extract_parameters(&self, sql: &str) -> Vec<String> {
-        let mut params = Vec::new();
+    /// 提取SQL中的参数（支持 #{param} 和 ${param} 两种格式）
+    fn extract_parameters(sql: &str) -> Vec<String> {
+        use std::collections::HashSet;
+        let mut params = HashSet::new();
         let mut chars = sql.chars().peekable();
 
         while let Some(c) = chars.next() {
-            if c == '#' && chars.next_if_eq(&'{').is_some() {
+            if (c == '#' || c == '$') && chars.next_if_eq(&'{').is_some() {
                 let mut param = String::new();
                 while let Some(&c) = chars.peek() {
                     if c == '}' {
@@ -453,23 +373,22 @@ impl MyBatisXmlParser {
                     }
                     param.push(chars.next().unwrap());
                 }
-                // 清理参数名，移除可能的属性
                 let param_name = param.split(|c| c == ':' || c == ',').next().unwrap_or(&param).trim();
-                if !param_name.is_empty() && !params.contains(&param_name.to_string()) {
-                    params.push(param_name.to_string());
+                if !param_name.is_empty() {
+                    params.insert(param_name.to_string());
                 }
             }
         }
 
-        params
+        params.into_iter().collect()
     }
 
-    // 添加一个辅助方法来跳过元素
-    fn skip_element(&mut self) -> Result<(), Box<dyn Error>> {
+    /// 跳过未知元素的完整子树
+    fn skip_element(&mut self) -> Result<(), MapperError> {
         let mut depth = 1;
         loop {
             match self.reader.read_event_into(&mut self.buf)? {
-                Event::Start(_) => depth += 1,
+                Event::Start(_) | Event::Empty(_) => depth += 1,
                 Event::End(_) => depth -= 1,
                 Event::Eof => break,
                 _ => {},
@@ -479,37 +398,5 @@ impl MyBatisXmlParser {
             }
         }
         Ok(())
-    }
-}
-
-
-#[derive(Debug)]
-pub(crate) struct KeyValue {
-    pub key: String,
-    pub condition: String,
-    pub value: String,
-}
-
-impl KeyValue {
-    /// 解析条件表达式为KeyValue向量
-    pub fn parse_conditions(expr: &str) -> Result<Vec<Self>, String> {
-        let mut conditions = Vec::new();
-        // 按'and'分割多个条件
-        for cond in expr.split(" and ") {
-            let trimmed = cond.trim();
-            // 使用正则表达式匹配key、condition和value
-            let re = regex::Regex::new(r"^\s*([\w\.\(\)]+)\s*([!=<>]+)\s*(.+?)\s*$")
-                .map_err(|e| format!("正则表达式编译失败: {}", e))?;
-
-            let caps = re.captures(trimmed)
-                .ok_or_else(|| format!("无效的条件格式: {}", trimmed))?;
-
-            conditions.push(KeyValue {
-                key: caps[1].to_string(),
-                condition: caps[2].to_string(),
-                value: caps[3].to_string(),
-            });
-        }
-        Ok(conditions)
     }
 }

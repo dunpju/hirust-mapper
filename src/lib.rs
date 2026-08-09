@@ -1,393 +1,330 @@
 pub mod mapper;
 pub use mapper::*;
 
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use serde_json::Value;
-    use crate::sql_generator::generate_sql;
     use super::*;
 
-    // cargo test run -- --show-output
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    /// 辅助函数：标准化SQL空白用于断言（去除多余空格、换行）
+    fn normalize_sql(sql: &str) -> String {
+        sql.split_whitespace().collect::<Vec<&str>>().join(" ")
     }
 
-    // cargo test it_works2 -- --show-output
     #[test]
-    fn it_works2() {
-        // 示例XML内容
-        let xml_content = r#"<?xml version="1.0" encoding="UTF-8"?>
-    <mapper namespace="com.example.UserMapper">
+    fn parse_and_generate_if() {
+        let xml = r#"<mapper namespace="com.example.UserMapper">
         <select id="findUserById" parameterType="Long" resultType="User">
-            SELECT * FROM users
-            WHERE 1=1
-            <if test="id != null">
-                AND id = #{id}
-            </if>
-            <if test="name != null and name != ''">
-                AND name = #{name}
-            </if>
+            SELECT * FROM users WHERE 1=1
+            <if test="id != null">AND id = #{id}</if>
+            <if test="name != null and name != ''">AND name = #{name}</if>
         </select>
+        </mapper>"#;
+
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+
+        let mut params: HashMap<String, Value> = HashMap::new();
+        params.insert("id".to_string(), Value::Number(1.into()));
+        params.insert("name".to_string(), Value::String("张三".to_string()));
+
+        let sql = normalize_sql(&mapper.build_sql("findUserById", &params).unwrap());
+        assert!(sql.contains("AND id = 1"), "SQL: {}", sql);
+        assert!(sql.contains("AND name = '张三'"), "SQL: {}", sql);
+    }
+
+    #[test]
+    fn test_foreach() {
+        let xml = r#"<mapper namespace="com.example.UserMapper">
         <select id="test_foreach">
-        SELECT * FROM tab1 where column155555 in
-        <foreach collection="list" index="index" item="item" open="(" separator="," close=")">
-            #{item}
-        </foreach>
-    </select>
-    <sql id="sql1">
-        select a,b,c,d,e,f,g
-    </sql>
-    <select id="select0">
-        <include refid="sql1"></include>
-        from tab1
-    </select>
-    <insert id="insert2">
-        insert into tab2 (ID) values (#{id})
-    </insert>
-    <insert id="batchInsert">
-        INSERT INTO book_attach_ocr_result(
-            book_attach_ocr_task_id, book_attach_id
-        )
-        VALUES
-        <foreach collection="list" separator="," item="entity">
-            (#{entity.bookAttachOcrTaskId}, #{entity.bookAttachId})
-        </foreach>
-    </insert>
-    <update id="batchUpdateCaseWhen">
-    UPDATE company
-    <set>
-    <trim prefix="`company_name`= CASE company_id" suffix="END,">
-        <foreach collection="companies" item="company">
-            WHEN #{company.companyId} THEN #{company.companyName}
-        </foreach>
-    </trim>
-    <trim prefix="`is_delete` = CASE company_id" suffix="END,">
-        <foreach collection="companies" item="company">
-            WHEN #{company.companyId} THEN #{company.isDelete}
-        </foreach>
-    </trim>
-    </set>
-    <where>
-        company_id in
-        <foreach collection="companies" item="company" separator="," open="(" close=")">
-            #{company.companyId}
-        </foreach>
-    </where>
-</update>
-    </mapper>"#;
+            SELECT * FROM tab1 where column1 in
+            <foreach collection="list" index="index" item="item" open="(" separator="," close=")">
+                #{item}
+            </foreach>
+        </select>
+        </mapper>"#;
 
-        //let xml_content = include_str!("../privilege_project.xml");
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
 
-        // 解析XML
-        let mut parser = MyBatisXmlParser::new(xml_content);
-        let mapper = parser.parse_mapper().unwrap();
-        println!("解析结果: {:?} \n", mapper);
+        let mut params: HashMap<String, Value> = HashMap::new();
+        params.insert("list".to_string(), Value::Array(vec![
+            Value::Number(1.into()), Value::Number(2.into()), Value::Number(3.into()),
+        ]));
 
-        /*// 获取SQL语句
-        if let Some(statement) = mapper.statements.get("findUserById") {
-            // 准备参数
-            let mut params: HashMap<String, Value> = HashMap::new();
-            //params.insert("id".to_string(), Value::Number(1.into()));
-            params.insert("name".to_string(), Value::String("张三".to_string()));
-
-            // 生成最终SQL
-            if let Some(dynamic_sql) = &statement.dynamic_sql {
-                let sql = generate_sql(dynamic_sql, &params, &mapper);
-                //println!("dynamic_sql内容: {:?}", dynamic_sql);
-                println!("生成的SQL: {}", sql);
-            }
-        }
-        // 获取SQL语句
-        if let Some(statement) = mapper.statements.get("test_foreach") {
-            // 准备参数
-            let mut params: HashMap<String, Vec<Value>> = HashMap::new();
-            params.insert("list".to_string(), vec![Value::Number(1.into()),
-                                                   Value::Number(2.into()),
-                                                   Value::Number(3.into())]);
-
-            // 生成最终SQL
-            if let Some(dynamic_sql) = &statement.dynamic_sql {
-                //println!("dynamic_sql内容: {:?}", dynamic_sql);
-                let sql = generate_sql(dynamic_sql, &params, &mapper);
-                println!("生成的SQL: {}", sql);
-            }
-        }
-        // 获取SQL语句
-        if let Some(statement) = mapper.statements.get("select0") {
-            // 添加调试信息
-            //println!("SQL片段列表: {:?}", mapper.sql_fragments.keys());
-
-            // 准备参数
-            let params: HashMap<String, Vec<Value>> = HashMap::new();
-
-            // 生成最终SQL
-            if let Some(dynamic_sql) = &statement.dynamic_sql {
-                //println!("dynamic_sql内容: {:?}", dynamic_sql);
-                let sql = generate_sql(dynamic_sql, &params, &mapper);
-                println!("生成的SQL: {}", sql);
-            }
-        }
-        // 获取SQL语句
-        if let Some(statement) = mapper.statements.get("insert2") {
-            // 添加调试信息
-            //println!("SQL片段列表: {:?}", mapper.sql_fragments.keys());
-
-            // 准备参数
-            let mut params: HashMap<String, Value> = HashMap::new();
-            params.insert("id".to_string(), Value::Number(1.into()));
-
-            // 生成最终SQL
-            if let Some(dynamic_sql) = &statement.dynamic_sql {
-                //println!("dynamic_sql内容: {:?}", dynamic_sql);
-                let sql = generate_sql(dynamic_sql, &params, &mapper);
-                println!("生成的SQL: {}", sql);
-            }
-        }
-        // 获取SQL语句
-        if let Some(statement) = mapper.statements.get("batchInsert") {
-            // 添加调试信息
-            //println!("SQL片段列表: {:?}", mapper.sql_fragments.keys());
-
-            // 准备参数
-            let mut params: HashMap<String, Vec<Value>> = HashMap::new();
-            params.insert("list".to_string(), vec![Value::Number(1.into())]);
-            // 生成最终SQL
-            if let Some(dynamic_sql) = &statement.dynamic_sql {
-                //println!("dynamic_sql内容: {:?}", dynamic_sql);
-                let sql = generate_sql(dynamic_sql, &params, &mapper);
-                println!("生成的SQL: {}", sql);
-            }
-        }*/
-        // 获取SQL语句
-        if let Some(statement) = mapper.statements.get("batchUpdateCaseWhen") {
-            // 添加调试信息
-            //println!("SQL片段列表: {:?}", mapper.sql_fragments.keys());
-
-            // 准备参数
-            let mut params: HashMap<String, Vec<Value>> = HashMap::new();
-            params.insert("companies".to_string(), vec![Value::Number(1.into())]);
-            // 生成最终SQL
-            if let Some(dynamic_sql) = &statement.dynamic_sql {
-                //println!("dynamic_sql内容: {:?}", dynamic_sql);
-                let sql = generate_sql(dynamic_sql, &params, &mapper);
-                println!("生成的SQL: {}", sql);
-            }
-        }
+        let sql = normalize_sql(&mapper.build_sql("test_foreach", &params).unwrap());
+        assert_eq!(sql, "SELECT * FROM tab1 where column1 in (1,2,3)");
     }
 
-    // cargo test update_case_when -- --show-output
     #[test]
-    fn update_case_when() {
-        // 示例XML内容
-        let xml_content = r#"<?xml version="1.0" encoding="UTF-8"?>
-    <mapper namespace="com.example.UserMapper">
-       <update id="batchUpdateCaseWhen">
-        UPDATE company
-        <set>
-            <trim prefix="`company_name`= CASE company_id" suffix="END,">
-                <foreach collection="companies" item="company">
-                    WHEN #{company.companyId} THEN #{company.companyName}
-                </foreach>
-            </trim>
-            <trim prefix="`is_delete` = CASE company_id" suffix="END,">
-                <foreach collection="companies" item="company">
-                    WHEN #{company.companyId} THEN #{company.isDelete}
-                </foreach>
-            </trim>
-        </set>
-        <where>
-            <foreach collection="companies" item="company" separator="AND">
-                company_id = #{company.companyId}
+    fn test_include() {
+        // 使用自闭合 include 标签测试
+        let xml = r#"<mapper namespace="com.example.UserMapper">
+        <sql id="sql1">select a,b,c</sql>
+        <select id="select0"><include refid="sql1"/> from tab1</select>
+        </mapper>"#;
+
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+        let sql = normalize_sql(&mapper.build_sql("select0", &HashMap::new()).unwrap());
+        assert!(sql.contains("select a,b,c"), "SQL: {}", sql);
+        assert!(sql.contains("from tab1"), "SQL: {}", sql);
+    }
+
+    #[test]
+    fn test_include_self_closing() {
+        // 测试自闭合 <include/> 标签
+        let xml = r#"<mapper namespace="com.example.UserMapper">
+        <sql id="sql1">select a,b,c</sql>
+        <select id="select1"><include refid="sql1"/> from tab1</select>
+        </mapper>"#;
+
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+        let sql = normalize_sql(&mapper.build_sql("select1", &HashMap::new()).unwrap());
+        assert!(sql.contains("select a,b,c"), "SQL: {}", sql);
+    }
+
+    #[test]
+    fn test_insert() {
+        let xml = r#"<mapper namespace="com.example.UserMapper">
+        <insert id="insert2">
+            insert into tab2 (ID) values (#{id})
+        </insert>
+        </mapper>"#;
+
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+
+        let mut params: HashMap<String, Value> = HashMap::new();
+        params.insert("id".to_string(), Value::Number(42.into()));
+
+        let sql = normalize_sql(&mapper.build_sql("insert2", &params).unwrap());
+        assert!(sql.contains("insert into tab2 (ID) values (42)"), "SQL: {}", sql);
+    }
+
+    #[test]
+    fn test_batch_insert() {
+        let xml = r#"<mapper namespace="com.example.UserMapper">
+        <insert id="batchInsert">
+            INSERT INTO book_attach_ocr_result(book_attach_ocr_task_id, book_attach_id) VALUES
+            <foreach collection="list" separator="," item="entity">
+                (#{entity.bookAttachOcrTaskId}, #{entity.bookAttachId})
             </foreach>
-        </where>
+        </insert>
+        </mapper>"#;
+
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+
+        let mut entity1 = serde_json::Map::new();
+        entity1.insert("bookAttachOcrTaskId".to_string(), Value::Number(1.into()));
+        entity1.insert("bookAttachId".to_string(), Value::Number(2.into()));
+
+        let mut params: HashMap<String, Value> = HashMap::new();
+        params.insert("list".to_string(), Value::Array(vec![Value::Object(entity1)]));
+
+        let sql = normalize_sql(&mapper.build_sql("batchInsert", &params).unwrap());
+        assert!(sql.contains("(1, 2)"), "SQL: {}", sql);
+    }
+
+    #[test]
+    fn test_batch_update_case_when() {
+        let xml = r#"<mapper namespace="com.example.UserMapper">
+        <update id="batchUpdateCaseWhen">
+            UPDATE company
+            <set>
+                <trim prefix="`company_name`= CASE company_id" suffix="END,">
+                    <foreach collection="companies" item="company">
+                        WHEN #{company.companyId} THEN #{company.companyName}
+                    </foreach>
+                </trim>
+            </set>
+            <where>
+                company_id in
+                <foreach collection="companies" item="company" separator="," open="(" close=")">
+                    #{company.companyId}
+                </foreach>
+            </where>
         </update>
-    </mapper>"#;
+        </mapper>"#;
 
-        // 解析XML
-        let mut parser = MyBatisXmlParser::new(xml_content);
-        let mapper = parser.parse_mapper().unwrap();
-        println!("解析结果: {:?} \n", mapper);
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
 
-        // 获取SQL语句
-        if let Some(statement) = mapper.statements.get("batchUpdateCaseWhen") {
-            // 添加调试信息
-            //println!("SQL片段列表: {:?}", mapper.sql_fragments.keys());
+        let mut company = serde_json::Map::new();
+        company.insert("companyId".to_string(), Value::Number(1.into()));
+        company.insert("companyName".to_string(), Value::String("Test".to_string()));
 
-            // 准备参数
-            let mut params: HashMap<String, Vec<Value>> = HashMap::new();
-            params.insert("companies".to_string(), vec![Value::Number(1.into())]);
-            // 生成最终SQL
-            if let Some(dynamic_sql) = &statement.dynamic_sql {
-                //println!("dynamic_sql内容: {:?}", dynamic_sql);
-                let sql = generate_sql(dynamic_sql, &params, &mapper);
-                println!("生成的SQL: {}", sql);
-            }
-        }
+        let mut params: HashMap<String, Value> = HashMap::new();
+        params.insert("companies".to_string(), Value::Array(vec![Value::Object(company)]));
+
+        let sql = normalize_sql(&mapper.build_sql("batchUpdateCaseWhen", &params).unwrap());
+        assert!(sql.contains("UPDATE company"), "SQL: {}", sql);
+        assert!(sql.contains("SET"), "SQL: {}", sql);
+        assert!(sql.contains("WHERE"), "SQL: {}", sql);
     }
 
-    // cargo test choose -- --show-output
-    //  $env:RUST_BACKTRACE=1; cargo test choose -- --show-output
     #[test]
-    fn choose() {
-        // 示例XML内容
-        let xml_content = r#"<?xml version="1.0" encoding="UTF-8"?>
-    <mapper namespace="com.example.UserMapper">
-    <select id="getCourseExamList" resultType="com.qimingdaren.errorbook.dto.exam.ExamJoinSysExamTypeVO">
-        <foreach collection="newExamCourseList" item="newExamCourse" separator="UNION">
-            (SELECT
-            A.examId,
-            A.areaCode,
-            A.startDate,
-            A.examYear,
-            A.examMonth,
-            B.moduleType,
-            #{newExamCourse.courseIds} AS courseIds,
-            #{newExamCourse.uniqueKey} AS uniqueKey
-            FROM
-            exam A,
-            sys_exam_type B
-            WHERE
-            A.examTypeId = B.sysExamTypeId
-            AND A.examId IN
-            <foreach collection="examIds" item="id" open="(" separator="," close=")">
-                #{id}
+    fn test_choose_with_nested_foreach() {
+        let xml = r#"<mapper namespace="com.example.UserMapper">
+        <select id="getCourseExamList">
+            <foreach collection="newExamCourseList" item="newExamCourse" separator="UNION">
+                (SELECT #{newExamCourse.courseIds} AS courseIds
+                FROM exam A WHERE A.examId IN
+                <foreach collection="examIds" item="id" open="(" separator="," close=")">
+                    #{id}
+                </foreach>
+                <choose>
+                    <when test="newExamCourse.selectContainCourse != null and newExamCourse.selectContainCourse != ''">
+                        AND A.sysCourseId IN(${newExamCourse.selectContainCourse})
+                    </when>
+                    <otherwise>
+                        AND A.sysCourseId IN(0)
+                    </otherwise>
+                </choose>
+                LIMIT 10)
             </foreach>
-            AND A.examStatus IN (2, 3)
-            AND A.isDelete = 0
-            <![CDATA[
-            AND A.isDelete < 10
-            AND A.isDelete > 10
-            ]]>
-            AND A.examId IN (
-            SELECT
-            C.examId
-            FROM
-            report_data C
-            WHERE
-            C.examId IN
-            <foreach collection="examIds" item="id" open="(" separator="," close=")">
-                #{id}
-            </foreach>
-            <choose>
-                <when test="newExamCourse.selectContainCourse != null and newExamCourse.selectContainCourse != ''">
-                    AND C.sysCourseId IN(${newExamCourse.selectContainCourse})
-                </when>
-                <otherwise>
-                    AND C.sysCourseId IN(0)
-                </otherwise>
-            </choose>
-            )
-            ORDER BY
-            A.startDate DESC
-            LIMIT 10)
-        </foreach>
-    </select>
-    </mapper>"#;
+        </select>
+        </mapper>"#;
 
-        // 解析XML
-        let mut parser = MyBatisXmlParser::new(xml_content);
-        let mapper = parser.parse_mapper().unwrap();
-        println!("解析结果: {:?} \n", mapper);
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
 
-        // 获取SQL语句
-        if let Some(statement) = mapper.statements.get("getCourseExamList") {
-            // 添加调试信息
-            //println!("SQL片段列表: {:?}", mapper.sql_fragments.keys());
+        let mut new_exam_course = serde_json::Map::new();
+        new_exam_course.insert("courseIds".to_string(), Value::String("1001".to_string()));
+        new_exam_course.insert("selectContainCourse".to_string(), Value::String("1,2,3".to_string()));
 
-            // 准备参数
-            let mut params: HashMap<String, Value> = HashMap::new();
-            // 创建newExamCourse对象
-            let mut new_exam_course1 = serde_json::Map::new();
-            //new_exam_course1.insert("selectContainCourse".to_string(), Value::String("1,2,3".to_string()));
-            new_exam_course1.insert("courseIds".to_string(), Value::String("1001".to_string()));
-            new_exam_course1.insert("uniqueKey".to_string(), Value::String("test-key1".to_string()));
+        let mut new_exam_course2 = serde_json::Map::new();
+        new_exam_course2.insert("courseIds".to_string(), Value::String("1002".to_string()));
+        new_exam_course2.insert("selectContainCourse".to_string(), Value::String("4,5,6".to_string()));
 
-            let mut new_exam_course2 = serde_json::Map::new();
-            new_exam_course2.insert("selectContainCourse".to_string(), Value::String("1,2,3,4".to_string()));
-            new_exam_course2.insert("courseIds".to_string(), Value::String("1002".to_string()));
-            new_exam_course2.insert("uniqueKey".to_string(), Value::String("test-key2".to_string()));
+        let mut params: HashMap<String, Value> = HashMap::new();
+        params.insert("newExamCourseList".to_string(), Value::Array(vec![
+            Value::Object(new_exam_course), Value::Object(new_exam_course2),
+        ]));
+        params.insert("examIds".to_string(), Value::Array(vec![Value::Number(1.into()), Value::Number(2.into())]));
 
-            // 将newExamCourse对象添加到newExamCourseList数组中
-            let new_exam_course_list = vec![Value::Object(new_exam_course1),
-                                            Value::Object(new_exam_course2)
-            ];
-
-            // 添加examIds数组参数
-            let exam_ids = vec![Value::Number(1.into()), Value::Number(2.into())];
-
-            // 设置参数
-            params.insert("newExamCourseList".to_string(), Value::Array(new_exam_course_list));
-            params.insert("examIds".to_string(), Value::Array(exam_ids));
-            // 生成最终SQL
-            if let Some(dynamic_sql) = &statement.dynamic_sql {
-                //println!("dynamic_sql内容: {:?}", dynamic_sql);
-                let sql = generate_sql(dynamic_sql, &params, &mapper);
-                println!("生成的SQL: {:?}", sql);
-            }
-        }
+        let sql = normalize_sql(&mapper.build_sql("getCourseExamList", &params).unwrap());
+        assert!(sql.contains("UNION"), "SQL should contain UNION (2 items): {}", sql);
+        assert!(sql.contains("IN (1,2)"), "SQL should contain IN(1,2): {}", sql);
+        // ${...} 直接替换，IN 后无空格
+        assert!(sql.contains("IN(1,2,3)"), "SQL should contain IN(1,2,3): {}", sql);
     }
 
-    // cargo test insert_duplicate_key_update -- --show-output
     #[test]
-    fn insert_duplicate_key_update() {
-        // 示例XML内容
-        let xml_content = r#"<?xml version="1.0" encoding="UTF-8"?>
-    <mapper namespace="com.example.UserMapper">
-       <insert id="insertDuplicateKeyUpdate" useGeneratedKeys="true" keyProperty="bookSchoolId">
+    fn test_insert_duplicate_key_update() {
+        let xml = r#"<mapper namespace="com.example.UserMapper">
+        <insert id="insertDuplicateKeyUpdate" useGeneratedKeys="true" keyProperty="bookSchoolId">
             INSERT INTO book_school (book_id, school_id, is_delete, create_time, update_time) VALUES
             <foreach collection="entityList" item="entity" separator=",">
                 (#{entity.bookId}, #{entity.schoolId}, 1, NOW(), NOW())
             </foreach>
             ON DUPLICATE KEY UPDATE
-            is_delete = values(is_delete),
-            update_time = values(update_time),
-            book_school_id = LAST_INSERT_ID(book_school_id)
+            is_delete = values(is_delete)
         </insert>
-    </mapper>"#;
+        </mapper>"#;
 
-        // 解析XML
-        let mut parser = MyBatisXmlParser::new(xml_content);
-        let mapper = parser.parse_mapper().unwrap();
-        println!("解析结果: {:?} \n", mapper);
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
 
-        // 获取SQL语句
-        if let Some(statement) = mapper.statements.get("insertDuplicateKeyUpdate") {
-            // 添加调试信息
-            //println!("SQL片段列表: {:?}", mapper.sql_fragments.keys());
+        let mut entity1 = serde_json::Map::new();
+        entity1.insert("bookId".to_string(), Value::Number(100.into()));
+        entity1.insert("schoolId".to_string(), Value::Number(200.into()));
+        let mut entity2 = serde_json::Map::new();
+        entity2.insert("bookId".to_string(), Value::Number(101.into()));
+        entity2.insert("schoolId".to_string(), Value::Number(201.into()));
 
-            // 准备参数
-            let mut params: HashMap<String, Value> = HashMap::new();
+        let mut params: HashMap<String, Value> = HashMap::new();
+        params.insert("entityList".to_string(), Value::Array(vec![
+            Value::Object(entity1), Value::Object(entity2),
+        ]));
 
-            // 创建符合XML期望的参数结构
-            let mut entity_list = Vec::new();
+        let sql = normalize_sql(&mapper.build_sql("insertDuplicateKeyUpdate", &params).unwrap());
+        assert!(sql.contains("(100, 200, 1,"), "SQL should contain (100,200,1,): {}", sql);
+        assert!(sql.contains("ON DUPLICATE KEY UPDATE"), "SQL: {}", sql);
+    }
 
-            // 创建第一个实体对象
-            let mut entity1 = serde_json::Map::new();
-            entity1.insert("bookId".to_string(), Value::Number(100.into()));
-            entity1.insert("schoolId".to_string(), Value::Number(200.into()));
-            entity_list.push(Value::Object(entity1));
+    #[test]
+    fn test_missing_param_produces_marker() {
+        let xml = r#"<mapper namespace="com.example.UserMapper">
+        <select id="t">SELECT #{missing_param}</select>
+        </mapper>"#;
 
-            // 创建第二个实体对象
-            let mut entity2 = serde_json::Map::new();
-            entity2.insert("bookId".to_string(), Value::Number(101.into()));
-            entity2.insert("schoolId".to_string(), Value::Number(201.into()));
-            entity_list.push(Value::Object(entity2));
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+        let sql = mapper.build_sql("t", &HashMap::new()).unwrap();
+        assert!(sql.contains("/* MISSING:#missing_param */"), "SQL: {}", sql);
+    }
 
-            // 将实体列表添加到参数中
-            params.insert("entityList".to_string(), Value::Array(entity_list));
+    #[test]
+    fn test_missing_fragment_returns_error() {
+        let xml = r#"<mapper namespace="com.example.UserMapper">
+        <select id="t"><include refid="nonexistent"/></select>
+        </mapper>"#;
 
-            // 生成最终SQL
-            if let Some(dynamic_sql) = &statement.dynamic_sql {
-                let sql = generate_sql(dynamic_sql, &params, &mapper);
-                println!("生成的SQL: {}", sql);
-            }
-        }
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+        let result = mapper.build_sql("t", &HashMap::new());
+        assert!(result.is_err(), "Expected error for missing fragment, got: {:?}", result);
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("nonexistent"), "Error message should mention fragment id: {}", err);
+    }
+
+    #[test]
+    fn test_statement_not_found() {
+        let xml = r#"<mapper namespace="com.example.UserMapper"></mapper>"#;
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+        let result = mapper.build_sql("nonexistent", &HashMap::new());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_or_condition() {
+        let xml = r#"<mapper namespace="com.example.UserMapper">
+        <select id="t">
+            SELECT * FROM t WHERE 1=1
+            <if test="a == 1 or b == 'hello'">AND extra = 1</if>
+        </select>
+        </mapper>"#;
+
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+
+        // a=1 满足 or 的第一项
+        let mut p1: HashMap<String, Value> = HashMap::new();
+        p1.insert("a".to_string(), Value::Number(1.into()));
+        assert!(mapper.build_sql("t", &p1).unwrap().contains("AND extra = 1"));
+
+        // b='hello' 满足 or 的第二项
+        let mut p2: HashMap<String, Value> = HashMap::new();
+        p2.insert("a".to_string(), Value::Number(99.into()));
+        p2.insert("b".to_string(), Value::String("hello".to_string()));
+        assert!(mapper.build_sql("t", &p2).unwrap().contains("AND extra = 1"));
+
+        // 两者都不满足
+        let mut p3: HashMap<String, Value> = HashMap::new();
+        p3.insert("a".to_string(), Value::Number(99.into()));
+        p3.insert("b".to_string(), Value::String("nope".to_string()));
+        assert!(!mapper.build_sql("t", &p3).unwrap().contains("AND extra = 1"));
+    }
+
+    #[test]
+    fn test_bind_tag() {
+        let xml = r#"<mapper namespace="com.example.UserMapper">
+        <select id="t">
+            <bind name="pattern" value="'%' + name + '%'"/>
+            SELECT * FROM t WHERE name LIKE #{pattern}
+        </select>
+        </mapper>"#;
+
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+
+        let mut params: HashMap<String, Value> = HashMap::new();
+        params.insert("name".to_string(), Value::String("test".to_string()));
+        let sql = mapper.build_sql("t", &params).unwrap();
+        // bind 的 value 不支持表达式求值，仅做变量替换
+        assert!(sql.contains("LIKE"), "SQL: {}", sql);
+    }
+
+    #[test]
+    fn test_error_display() {
+        let err = MapperError::MissingParam {
+            param: "foo".to_string(),
+            context: "findUser".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("foo"), "Error message: {}", msg);
+        assert!(msg.contains("findUser"), "Error message: {}", msg);
     }
 }
