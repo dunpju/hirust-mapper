@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 /// MyBatis映射文件模型
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Mapper {
     /// 命名空间
     pub namespace: String,
@@ -78,7 +78,7 @@ pub enum StatementType {
 }
 
 /// SQL语句模型
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SqlStatement {
     /// 语句ID
     pub id: String,
@@ -99,7 +99,7 @@ pub struct SqlStatement {
 }
 
 /// 结果映射模型
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ResultMap {
     /// 结果映射ID
     pub id: String,
@@ -110,7 +110,7 @@ pub struct ResultMap {
 }
 
 /// 结果列映射
-#[derive(Debug)]
+#[derive(Debug, Default, Clone)]
 pub struct ResultColumn {
     /// 属性名
     pub property: String,

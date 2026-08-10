@@ -1,0 +1,12 @@
+[package]
+name = "hirust-mapper-core"
+version = "0.2.0"
+edition = "2024"
+description = "MyBatis XML 动态 SQL 解析与生成核心库"
+license = "MIT"
+
+[dependencies]
+quick-xml = "0.38"
+serde_json = "1"
+regex = "1"
+lazy_static = "1.5"

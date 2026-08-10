@@ -1,0 +1,22 @@
+[package]
+name = "hirust-mapper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MyBatis 风格的 Rust ORM 框架（门面 crate）"
+
+[dependencies]
+hirust-mapper-core = { path = "../hirust-mapper-core" }
+hirust-mapper-runtime = { path = "../hirust-mapper-runtime", optional = true }
+hirust-mapper-macros = { path = "../hirust-mapper-macros", optional = true }
+
+[features]
+default = ["core"]
+# 纯解析核心（默认）
+core = []
+# ORM 运行时（session、executor、config、热重载）
+runtime = ["hirust-mapper-runtime"]
+# 编译时类型安全 proc_macro
+macros = ["hirust-mapper-macros"]
+# 全功能
+full = ["runtime", "macros"]

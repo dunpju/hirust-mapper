@@ -1,5 +1,18 @@
-pub mod mapper;
-pub use mapper::*;
+//! # hirust-mapper-core
+//!
+//! MyBatis XML 动态 SQL 解析与生成的核心库。
+//!
+//! 本 crate 提供纯解析与生成能力，不包含数据库连接、事务管理等运行时功能。
+//! 解析后的 `Mapper` 可通过 `build_sql` 方法根据参数生成最终 SQL。
+
+pub mod model;
+pub mod parser;
+pub mod sql_generator;
+
+pub use model::*;
+pub use parser::*;
+pub use sql_generator::ParamsAccess;
+pub use sql_generator::generate_sql;
 
 #[cfg(test)]
 mod tests {
@@ -57,7 +70,6 @@ mod tests {
 
     #[test]
     fn test_include() {
-        // 使用自闭合 include 标签测试
         let xml = r#"<mapper namespace="com.example.UserMapper">
         <sql id="sql1">select a,b,c</sql>
         <select id="select0"><include refid="sql1"/> from tab1</select>
@@ -71,7 +83,6 @@ mod tests {
 
     #[test]
     fn test_include_self_closing() {
-        // 测试自闭合 <include/> 标签
         let xml = r#"<mapper namespace="com.example.UserMapper">
         <sql id="sql1">select a,b,c</sql>
         <select id="select1"><include refid="sql1"/> from tab1</select>
@@ -201,7 +212,6 @@ mod tests {
         let sql = normalize_sql(&mapper.build_sql("getCourseExamList", &params).unwrap());
         assert!(sql.contains("UNION"), "SQL should contain UNION (2 items): {}", sql);
         assert!(sql.contains("IN (1,2)"), "SQL should contain IN(1,2): {}", sql);
-        // ${...} 直接替换，IN 后无空格
         assert!(sql.contains("IN(1,2,3)"), "SQL should contain IN(1,2,3): {}", sql);
     }
 
@@ -281,18 +291,15 @@ mod tests {
 
         let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
 
-        // a=1 满足 or 的第一项
         let mut p1: HashMap<String, Value> = HashMap::new();
         p1.insert("a".to_string(), Value::Number(1.into()));
         assert!(mapper.build_sql("t", &p1).unwrap().contains("AND extra = 1"));
 
-        // b='hello' 满足 or 的第二项
         let mut p2: HashMap<String, Value> = HashMap::new();
         p2.insert("a".to_string(), Value::Number(99.into()));
         p2.insert("b".to_string(), Value::String("hello".to_string()));
         assert!(mapper.build_sql("t", &p2).unwrap().contains("AND extra = 1"));
 
-        // 两者都不满足
         let mut p3: HashMap<String, Value> = HashMap::new();
         p3.insert("a".to_string(), Value::Number(99.into()));
         p3.insert("b".to_string(), Value::String("nope".to_string()));
@@ -313,7 +320,6 @@ mod tests {
         let mut params: HashMap<String, Value> = HashMap::new();
         params.insert("name".to_string(), Value::String("test".to_string()));
         let sql = mapper.build_sql("t", &params).unwrap();
-        // bind 的 value 不支持表达式求值，仅做变量替换
         assert!(sql.contains("LIKE"), "SQL: {}", sql);
     }
 
