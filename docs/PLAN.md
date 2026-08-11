@@ -19,7 +19,7 @@
 | P7 热重载 | ✅ 已完成 | 2026-08-11 | runtime 39 + hot_reload 3 测试通过（修改 XML 后查询自动更新） |
 | P8 ResultMap 增强 | ✅ 已完成 | 2026-08-11 | core 41 + nested_mapping 3 测试通过（association/collection/selectKey/size） |
 | P9 Proc Macros | ✅ 已完成 | 2026-08-11 | macros 6 测试通过（DAO CRUD + MapperModel 列映射） |
-| P10 门面 + 文档 + 示例 | ⬜ 待实施 | — | — |
+| P10 门面 + 文档 + 示例 | ✅ 已完成 | 2026-08-11 | 2 示例可运行，102 测试全通过，README v2 完成 |
 
 **当前可在全新电脑上运行的验证命令：**
 
@@ -109,7 +109,11 @@ hirust-mapper/
 │       └── derive_model.rs          # #[derive(MapperModel)] 列映射
 │
 ├── hirust-mapper/                     # 门面 crate ✅
-│   └── src/lib.rs                    # feature gate 聚合
+│   ├── src/lib.rs                    # feature gate 聚合
+│   └── examples/                     # ✅ 可运行示例 (P10)
+│       ├── runtime_basic.rs
+│       ├── proc_macro_usage.rs
+│       └── mappers/UserDao.xml
 │
 └── docs/
     └── PLAN.md                       # 本文件
@@ -526,14 +530,21 @@ P6 已补充 `Database(#[from] sqlx::Error)` 变体（见上表注释，当前�
 - [x] 语句 id 合法标识符校验；非单元 struct / 文件缺失 / 解析失败均编译期报错
 - **验证**：macros 6 测试通过（dao_macro CRUD 3 + derive_model 列映射 3）
 
-### ⬜ P10: 门面 + 文档 + 示例
-- [ ] facade crate 完善 feature gates
-- [ ] 更新 README（v2 API 示例）
-- [ ] examples/runtime_basic.rs
-- [ ] examples/proc_macro_usage.rs
-- **验证**：示例可独立编译运行
+### ✅ P10: 门面 + 文档 + 示例
+- [x] facade crate feature gates 完善：`macros` 隐含 `runtime`（生成代码依赖运行时）
+- [x] `examples/runtime_basic.rs`（运行时 CRUD + 事务，`--features runtime`）
+- [x] `examples/proc_macro_usage.rs` + `examples/mappers/UserDao.xml`（`--features full`）
+- [x] README 重写为 v2（架构、feature 分层、运行时/宏 API、XML 格式、配置文件）
+- [x] `[[example]]` required-features 声明，`cargo build --examples --features full` 零警告
+- **验证**：2 示例可独立 `cargo run` 运行，workspace 102 测试全通过
 
-**总计剩余约 1-2 个工作日（P10）。**
+**全部 10 个阶段已完成（P1-P10）✅**
+
+> 可运行示例：
+> ```sh
+> cargo run --example runtime_basic --features runtime
+> cargo run --example proc_macro_usage --features full
+> ```
 
 ---
 

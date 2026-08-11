@@ -10,13 +10,27 @@ hirust-mapper-core = { path = "../hirust-mapper-core" }
 hirust-mapper-runtime = { path = "../hirust-mapper-runtime", optional = true }
 hirust-mapper-macros = { path = "../hirust-mapper-macros", optional = true }
 
+[dev-dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true, features = ["runtime-tokio", "any", "sqlite"] }
+
 [features]
 default = ["core"]
-# 纯解析核心（默认）
+# 纯解析核心（默认）：XML 解析 + 动态 SQL 生成（无数据库依赖）
 core = []
-# ORM 运行时（session、executor、config、热重载）
+# ORM 运行时：配置、session、executor、类型处理、热重载、ResultMap
 runtime = ["hirust-mapper-runtime"]
-# 编译时类型安全 proc_macro
-macros = ["hirust-mapper-macros"]
+# 编译时类型安全 proc_macro（隐含 runtime，因生成代码依赖运行时）
+macros = ["hirust-mapper-macros", "runtime"]
 # 全功能
 full = ["runtime", "macros"]
+
+[[example]]
+name = "runtime_basic"
+required-features = ["runtime"]
+
+[[example]]
+name = "proc_macro_usage"
+required-features = ["full"]
