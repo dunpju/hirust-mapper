@@ -9,6 +9,14 @@ description = "hirust-mapper 编译时类型安全 proc_macro"
 proc-macro = true
 
 [dependencies]
+hirust-mapper-core = { path = "../hirust-mapper-core" }
 quote = { workspace = true }
 proc-macro2 = { workspace = true }
 syn = { workspace = true }
+
+[dev-dependencies]
+hirust-mapper-runtime = { path = "../hirust-mapper-runtime" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true, features = ["runtime-tokio", "any", "sqlite"] }

@@ -1,0 +1,7 @@
+<mapper namespace="com.test.UserDao">
+    <select id="findById">SELECT id, name, age FROM users WHERE id = #{id}</select>
+    <select id="findAll">SELECT id, name, age FROM users ORDER BY id</select>
+    <insert id="insertUser">INSERT INTO users (name, age) VALUES (#{name}, #{age})</insert>
+    <update id="updateAge">UPDATE users SET age = #{age} WHERE id = #{id}</update>
+    <delete id="deleteById">DELETE FROM users WHERE id = #{id}</delete>
+</mapper>

@@ -18,13 +18,13 @@
 | P6 Executor + SqlSession | ✅ 已完成 | 2026-08-11 | runtime 34 + e2e 10 测试通过（完整 ORM 可用） |
 | P7 热重载 | ✅ 已完成 | 2026-08-11 | runtime 39 + hot_reload 3 测试通过（修改 XML 后查询自动更新） |
 | P8 ResultMap 增强 | ✅ 已完成 | 2026-08-11 | core 41 + nested_mapping 3 测试通过（association/collection/selectKey/size） |
-| P9 Proc Macros | ⬜ 待实施 | — | — |
+| P9 Proc Macros | ✅ 已完成 | 2026-08-11 | macros 6 测试通过（DAO CRUD + MapperModel 列映射） |
 | P10 门面 + 文档 + 示例 | ⬜ 待实施 | — | — |
 
 **当前可在全新电脑上运行的验证命令：**
 
 ```bash
-cargo test --workspace     # 应输出 core 41 + runtime 39 + crud 10 + hot_reload 3 + nested 3 = 96 个测试通过
+cargo test --workspace     # 应输出 core 41 + runtime 39 + crud 10 + hot_reload 3 + nested 3 + macros 6 = 102 个测试通过
 ```
 
 ---
@@ -35,7 +35,7 @@ cargo test --workspace     # 应输出 core 41 + runtime 39 + crud 10 + hot_relo
    ```bash
    git clone <repo-url> hirust-mapper
    cd hirust-mapper
-   cargo test --workspace          # 确认 96 个测试全通过
+   cargo test --workspace          # 确认 102 个测试全通过
    ```
 
 2. **识别下一个待实施阶段**：查看上方"执行状态"表格，找到第一个 `⬜ 待实施` 的阶段。
@@ -102,8 +102,11 @@ hirust-mapper/
 │       │   └── watcher.rs
 │       ├── bound_sql.rs              # ⬜ BoundSql (P4)
 │
-├── hirust-mapper-macros/              # proc_macro 骨架（占位宏已就位）
-│   └── src/lib.rs                    # ⬜ 实际宏实现 (P9)
+├── hirust-mapper-macros/              # proc_macro（✅ P9 已实现）
+│   └── src/
+│       ├── lib.rs                    # 宏入口
+│       ├── gen_mapper.rs            # #[hirust_mapper(xml)] DAO 生成
+│       └── derive_model.rs          # #[derive(MapperModel)] 列映射
 │
 ├── hirust-mapper/                     # 门面 crate ✅
 │   └── src/lib.rs                    # feature gate 聚合
@@ -340,33 +343,52 @@ async fn main() -> anyhow::Result<()> {
 
 ## 7. Proc Macro API 使用示例（P9 待实施）
 
-### `#[derive(MapperModel)]` — 自动行映射
+### `#[derive(MapperModel)]` — 列映射内省（✅ P9 已实现）
 
 ```rust
 use hirust_mapper_macros::MapperModel;
 
 #[derive(MapperModel, Deserialize)]
+#[allow(dead_code)]
 struct User {
     #[mapper(column = "user_name")]
     name: String,
     email: String,
     #[mapper(column = "created_at", type_handler = "chrono::DateTime<chrono::Utc>")]
-    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    created_at: String,
 }
+
+// 生成 User::column_mappings() -> &'static [(&str, &str)]
+// 生成 User::type_handlers()   -> &'static [(&str, &str)]
 ```
 
-### `#[hirust_mapper(xml = "...")]` — 编译时 Mapper 生成
+### `#[hirust_mapper(xml = "...")]` — 编译时 Mapper DAO 生成（✅ P9 已实现）
 
 ```rust
-#[hirust_mapper(xml = "mappers/UserDao.xml")]
+use hirust_mapper_macros::hirust_mapper;
+use hirust_mapper_runtime::{SqlSessionFactory, HirustMapperConfig, EnvironmentConfig};
+
+#[hirust_mapper(xml = "mappers/UserDao.xml")]  // 编译时读取+解析+校验
 struct UserDao;
 
-let factory = SqlSessionFactory::build(config).await?;
+// 配置 + 运行时加载同一 XML（namespace 注册）
+let config = HirustMapperConfig::new()
+    .with_environment(EnvironmentConfig { driver: "sqlite".into(), url: "sqlite::memory:".into(), ..Default::default() })
+    .with_mapper_paths(vec!["mappers/UserDao.xml".to_string()]);
+let factory = SqlSessionFactory::build(config, ".").await?;
+
 let dao = UserDao::new(factory);
-let user: Option<User> = dao.find_by_id(42).await?;  // 类型安全！
+
+// 为每个 <select>/<insert>/<update>/<delete> 生成同名方法（返回类型泛型，调用方指定）
+let users: Vec<User> = dao.findById(&params).await?;   // select → Vec<T>
+let id = dao.insertUser(&new_user).await?;              // insert → Option<i64>
+let n = dao.updateAge(&update).await?;                  // update → u64
 ```
 
-proc_macro 内部：`include_str!` → 同 core 解析器解析 XML → 按方法签名生成类型化代码 → 委托 `SqlSession` 方法。
+> **设计说明**：编译时宏读取 XML（路径相对 `CARGO_MANIFEST_DIR`）并用 core 解析器校验——
+> 文件缺失、解析错误、非单元 struct、非法语句 id 均在编译期报错。生成的 DAO 持有
+> `Arc<SqlSessionFactory>`，每方法开一个 session 委托 `select_list`/`insert`/`update`/`delete`。
+> select 返回 `Vec<T>`（调用方用 `T: DeserializeOwned` 指定类型；单行取 `.pop()`）。
 
 ---
 
@@ -494,12 +516,15 @@ P6 已补充 `Database(#[from] sqlx::Error)` 变体（见上表注释，当前�
 - [x] SqlSession: select_one/select_list 按 statement 的 resultMap 自动走嵌套映射
 - **验证**：core 41（含 11 个 P8 解析/条件测试）+ nested_mapping 3（association/collection/select_one e2e）
 
-### ⬜ P9: Proc Macros
-- [ ] `hirust-mapper-macros/src/derive_model.rs`: #[derive(MapperModel)]
-- [ ] `hirust-mapper-macros/src/gen_mapper.rs`: #[hirust_mapper(xml="...")]
-- [ ] include_str! 编译时加载 XML + 解析 + 方法签名生成
-- [ ] 方法体委托 SqlSession
-- **验证**：trybuild crate 编译期测试
+### ✅ P9: Proc Macros
+- [x] `hirust-mapper-macros/src/gen_mapper.rs`: `#[hirust_mapper(xml="...")]`
+  - 编译时读取 XML（相对 `CARGO_MANIFEST_DIR`）+ `MyBatisXmlParser` 解析校验
+  - 改写单元 struct 增加 `Arc<SqlSessionFactory>` 字段，生成 `new()` + 每语句同名方法
+  - 方法委托 SqlSession（select→Vec\<T\>、insert→Option\<i64\>、update/delete→u64）
+- [x] `hirust-mapper-macros/src/derive_model.rs`: `#[derive(MapperModel)]`
+  - 解析 `#[mapper(column, type_handler)]`，生成 `column_mappings()` / `type_handlers()`
+- [x] 语句 id 合法标识符校验；非单元 struct / 文件缺失 / 解析失败均编译期报错
+- **验证**：macros 6 测试通过（dao_macro CRUD 3 + derive_model 列映射 3）
 
 ### ⬜ P10: 门面 + 文档 + 示例
 - [ ] facade crate 完善 feature gates
@@ -508,7 +533,7 @@ P6 已补充 `Database(#[from] sqlx::Error)` 变体（见上表注释，当前�
 - [ ] examples/proc_macro_usage.rs
 - **验证**：示例可独立编译运行
 
-**总计剩余约 5-8 个工作日（P9-P10）。**
+**总计剩余约 1-2 个工作日（P10）。**
 
 ---
 
@@ -562,3 +587,5 @@ P6 已补充 `Database(#[from] sqlx::Error)` 变体（见上表注释，当前�
 | `SqlSession` (完整) | `hirust-mapper-runtime/src/session.rs` | CRUD + 事务 + MapperProxy (P6) |
 | `MapperProxy` | `hirust-mapper-runtime/src/session.rs` | 命名空间代理 (P6) |
 | `MapperWatcher` | `hirust-mapper-runtime/src/hot_reload/watcher.rs` | 热重载监视器（notify + 去抖） (P7) |
+| `#[hirust_mapper(xml)]` | `hirust-mapper-macros/src/gen_mapper.rs` | 编译时 DAO 方法生成 (P9) |
+| `#[derive(MapperModel)]` | `hirust-mapper-macros/src/derive_model.rs` | 列映射内省派生 (P9) |
