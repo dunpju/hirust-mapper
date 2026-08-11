@@ -16,7 +16,7 @@
 | P4 BoundSql 两阶段重构 | ✅ 已完成 | 2026-08-11 | core 30/30 测试通过（含 15 个 BoundSql 测试） |
 | P5 TypeHandler + 参数绑定 | ✅ 已完成 | 2026-08-11 | runtime 34/34 测试通过（含 17 个 P5 新测试） |
 | P6 Executor + SqlSession | ✅ 已完成 | 2026-08-11 | runtime 34 + e2e 10 测试通过（完整 ORM 可用） |
-| P7 热重载 | ⬜ 待实施 | — | — |
+| P7 热重载 | ✅ 已完成 | 2026-08-11 | runtime 39 + hot_reload 3 测试通过（修改 XML 后查询自动更新） |
 | P8 ResultMap 增强 | ⬜ 待实施 | — | — |
 | P9 Proc Macros | ⬜ 待实施 | — | — |
 | P10 门面 + 文档 + 示例 | ⬜ 待实施 | — | — |
@@ -24,7 +24,7 @@
 **当前可在全新电脑上运行的验证命令：**
 
 ```bash
-cargo test --workspace     # 应输出 core 30 + runtime 34 + e2e 10 = 74 个测试通过
+cargo test --workspace     # 应输出 core 30 + runtime 39 + crud 10 + hot_reload 3 = 82 个测试通过
 ```
 
 ---
@@ -35,7 +35,7 @@ cargo test --workspace     # 应输出 core 30 + runtime 34 + e2e 10 = 74 个测
    ```bash
    git clone <repo-url> hirust-mapper
    cd hirust-mapper
-   cargo test --workspace          # 确认 74 个测试全通过
+   cargo test --workspace          # 确认 82 个测试全通过
    ```
 
 2. **识别下一个待实施阶段**：查看上方"执行状态"表格，找到第一个 `⬜ 待实施` 的阶段。
@@ -85,6 +85,8 @@ hirust-mapper/
 │       ├── executor/                 # ✅ SimpleExecutor (泛型 sqlx 执行) (P6)
 │       │   └── simple.rs
 │       ├── session.rs                # ✅ SqlSession 全 CRUD + 事务 + MapperProxy (P6)
+│       ├── hot_reload/               # ✅ MapperWatcher (notify + 去抖) (P7)
+│           └── watcher.rs
 │       ├── session.rs                # ⬜ SqlSession (P6)
 │       ├── executor/                 # ⬜ (P6)
 │       │   ├── simple.rs
@@ -131,7 +133,7 @@ hirust-mapper (facade) → 依赖 → core + runtime(可选) + macros(可选)
 | toml | 0.8 | 配置文件解析 | ✅ 已用 (runtime) |
 | sqlx | 0.8 | 数据库执行层 | ✅ P3 已引入 |
 | tokio | 1 | async runtime | ✅ P3 已引入 |
-| notify | 7 | 文件变更监控/热重载 | ⬜ P7 引入 |
+| notify | 7 | 文件变更监控/热重载 | ✅ P7 已引入 |
 | chrono/uuid | 0.4/1 | 可选类型处理器 | ✅ P5 已引入（feature-gated） |
 
 ---
@@ -357,13 +359,18 @@ proc_macro 内部：`include_str!` → 同 core 解析器解析 XML → 按方�
 
 ---
 
-## 8. 热重载机制（P7 待实施）
+## 8. 热重载机制（✅ P7 已实现）
 
-1. `SqlSessionFactory::build()` 启动时，若 `mapper_refresh_interval_ms > 0`，创建 `notify::Watcher`
-2. watcher 监控 glob 匹配的 XML 文件所在目录
-3. 文件变更事件通过 channel 发送到专用线程，200ms 去抖
-4. 回调函数重新解析 XML → `MyBatisXmlParser::parse_mapper()` → 调用 `registry.insert_mapper()` 替换
-5. `MapperRegistry` 使用 `Arc<RwLock<>>` 保证并发读写安全（P2 已就位）
+`MapperWatcher`（`hot_reload/watcher.rs`）实现：
+
+1. `SqlSessionFactory::build()` 启动时，若 `mapper_refresh_interval_ms > 0`，启动 `MapperWatcher`
+2. `extract_watch_dirs` 从 glob 模式推导监视目录（取首个通配符前的静态前缀），递归监视
+3. `notify::RecommendedWatcher` 回调将变更路径经 mpsc channel 发送到专用 worker 线程
+4. worker 线程收集变更（仅 `.xml`），安静期（≥ `refresh_interval_ms`，最小 50ms）后批量重解析
+5. 每个变更文件调用 `registry.register_from_file()` → `insert_mapper()` 原子替换（`MapperRegistry` 的 `Arc<RwLock<HashMap>>` 保证并发安全，P2 就位）
+6. 热重载失败不阻断工厂构建（降级为无热重载）；`Drop` 时优雅关闭（watcher 断开 → worker 退出 → join）
+
+> **验证**：`tests/hot_reload.rs` 3 个测试——修改 XML 后 SQL 自动变更、新增 statement 自动可用、默认禁用热重载。
 
 ---
 
@@ -459,12 +466,14 @@ P6 已补充 `Database(#[from] sqlx::Error)` 变体（见上表注释，当前�
 - **里程碑**：✅ 完整 ORM 可用：加载 XML → 执行 SQL → 映射结果 → 事务
 - **验证**：runtime 34 + e2e 10 测试通过（SQLite 内存库 + 真实 CRUD + 事务提交/回滚）
 
-### ⬜ P7: 热重载
-- [ ] 引入 notify 依赖
-- [ ] `hot_reload/watcher.rs`: MapperWatcher (去抖事件循环)
-- [ ] SqlSessionFactory::build() 启动 watcher（当 refresh_interval > 0）
-- [ ] 回调重新解析 XML → registry.insert_mapper() 替换
-- **验证**：测试修改 XML 文件后查询结果变化
+### ✅ P7: 热重载
+- [x] 引入 notify 7 依赖
+- [x] `hot_reload/watcher.rs`: `MapperWatcher`（notify + 去抖 worker 线程，安静期批量重解析）
+- [x] `extract_watch_dirs`: 从 glob 模式推导监视目录
+- [x] SqlSessionFactory::build() 启动 watcher（当 `mapper_refresh_interval_ms > 0`）
+- [x] 回调重新解析 XML → `registry.insert_mapper()` 原子替换（线程安全）
+- [x] 优雅关闭（Drop：watcher 断开事件通道 → worker 退出 → join）
+- **验证**：runtime 39 + hot_reload 3 测试通过（修改 XML 文件后查询结果自动变化）
 
 ### ⬜ P8: ResultMap 增强
 - [ ] model.rs: ResultMap 支持 association/collection 嵌套
@@ -487,7 +496,7 @@ P6 已补充 `Database(#[from] sqlx::Error)` 变体（见上表注释，当前�
 - [ ] examples/proc_macro_usage.rs
 - **验证**：示例可独立编译运行
 
-**总计剩余约 8-14 个工作日（P7-P10）。**
+**总计剩余约 6-11 个工作日（P8-P10）。**
 
 ---
 
@@ -539,3 +548,4 @@ P6 已补充 `Database(#[from] sqlx::Error)` 变体（见上表注释，当前�
 | `SimpleExecutor` | `hirust-mapper-runtime/src/executor/simple.rs` | 泛型 sqlx 执行器（pool/事务） (P6) |
 | `SqlSession` (完整) | `hirust-mapper-runtime/src/session.rs` | CRUD + 事务 + MapperProxy (P6) |
 | `MapperProxy` | `hirust-mapper-runtime/src/session.rs` | 命名空间代理 (P6) |
+| `MapperWatcher` | `hirust-mapper-runtime/src/hot_reload/watcher.rs` | 热重载监视器（notify + 去抖） (P7) |

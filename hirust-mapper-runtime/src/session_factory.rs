@@ -10,6 +10,7 @@ use std::sync::{Arc, RwLock};
 use crate::config::HirustMapperConfig;
 use crate::environment::Environment;
 use crate::error::Result;
+use crate::hot_reload::{extract_watch_dirs, MapperWatcher};
 use crate::registry::{MapperRegistry, TypeAliasRegistry};
 use crate::type_handler::TypeHandlerRegistry;
 
@@ -34,6 +35,8 @@ pub struct SqlSessionFactory {
     type_handler_registry: Arc<TypeHandlerRegistry>,
     config: HirustMapperConfig,
     base_dir: std::path::PathBuf,
+    /// 热重载监视器（None 表示未启用热重载）
+    watcher: Option<MapperWatcher>,
 }
 
 impl std::fmt::Debug for SqlSessionFactory {
@@ -42,6 +45,7 @@ impl std::fmt::Debug for SqlSessionFactory {
             .field("driver", &self.environment.driver())
             .field("url", &self.environment.url())
             .field("mapper_count", &self.mapper_count())
+            .field("hot_reload", &self.watcher.as_ref().map(|w| w.is_running()).unwrap_or(false))
             .finish()
     }
 }
@@ -68,22 +72,50 @@ impl SqlSessionFactory {
         // 2. 初始化并加载 Mapper 注册表
         let mapper_registry = MapperRegistry::new();
         let _namespaces = mapper_registry.load_from_config(&config, &base_dir)?;
+        let mapper_registry = Arc::new(RwLock::new(mapper_registry));
 
         // 3. 初始化类型别名 / 类型处理器注册表
         let type_alias_registry = Arc::new(TypeAliasRegistry::from_map(config.type_aliases.clone()));
         let type_handler_registry = Arc::new(TypeHandlerRegistry::with_defaults());
 
+        // 4. 热重载（当 refresh_interval > 0 时启动）
+        let watcher = if config.settings.mapper_refresh_interval_ms > 0 {
+            let watch_dirs = extract_watch_dirs(&config.settings.mapper_paths, &base_dir);
+            let registry_clone = mapper_registry.read().expect("MapperRegistry 锁中毒").clone();
+            match MapperWatcher::start(
+                registry_clone,
+                watch_dirs,
+                config.settings.mapper_refresh_interval_ms,
+            ) {
+                Ok(w) => {
+                    eprintln!(
+                        "[hirust-mapper] 热重载已启用: 间隔 {}ms",
+                        config.settings.mapper_refresh_interval_ms
+                    );
+                    Some(w)
+                }
+                Err(e) => {
+                    // 热重载失败不阻断工厂构建（ORM 仍可用，仅失去热重载能力）
+                    eprintln!("[hirust-mapper][WARN] 热重载启动失败（已禁用）: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             environment,
-            mapper_registry: Arc::new(RwLock::new(mapper_registry)),
+            mapper_registry,
             type_alias_registry,
             type_handler_registry,
             config,
             base_dir,
+            watcher,
         })
     }
 
-    /// 从已有组件构造（供高级用法 / 测试使用）
+    /// 从已有组件构造（供高级用法 / 测试使用；不启动热重载）
     pub fn from_parts(
         environment: Environment,
         mapper_registry: MapperRegistry,
@@ -99,6 +131,7 @@ impl SqlSessionFactory {
             type_handler_registry: Arc::new(type_handler_registry),
             config,
             base_dir,
+            watcher: None,
         }
     }
 
@@ -145,6 +178,11 @@ impl SqlSessionFactory {
     /// 所有已注册的 namespace
     pub fn namespaces(&self) -> Vec<String> {
         self.mapper_registry().namespaces()
+    }
+
+    /// 热重载是否启用
+    pub fn hot_reload_enabled(&self) -> bool {
+        self.watcher.as_ref().map(|w| w.is_running()).unwrap_or(false)
     }
 
     /// 打开一个新的 SqlSession（请求级，共享工厂的连接池和注册表）

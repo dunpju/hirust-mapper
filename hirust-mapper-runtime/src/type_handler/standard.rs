@@ -517,7 +517,7 @@ mod tests {
     fn test_f64_handler_set_parameter() {
         use sqlx::Arguments;
         let mut args: AnyArguments = AnyArguments::default();
-        F64Handler.set_parameter(&json!(3.14), &mut args).unwrap();
+        F64Handler.set_parameter(&json!(2.5), &mut args).unwrap();
         F64Handler.set_parameter(&json!(null), &mut args).unwrap();
         assert_eq!(args.len(), 2);
     }
