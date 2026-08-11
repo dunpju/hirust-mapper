@@ -11,6 +11,10 @@ pub enum MapperRuntimeError {
     #[error("Mapper 错误: {0}")]
     Mapper(#[from] MapperError),
 
+    /// 数据库执行错误（sqlx）
+    #[error("数据库错误: {0}")]
+    Database(#[from] sqlx::Error),
+
     /// 连接 / 池错误
     #[error("连接错误: {0}")]
     Connection(String),

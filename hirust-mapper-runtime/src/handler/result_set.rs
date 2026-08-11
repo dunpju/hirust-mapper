@@ -21,6 +21,7 @@ use serde_json::{Number, Value};
 use sqlx::any::{AnyRow, AnyTypeInfoKind};
 use sqlx::Column;
 use sqlx::Row;
+use sqlx::ValueRef;
 
 use crate::error::{MapperRuntimeError, Result};
 use crate::type_handler::TypeHandlerRegistry;
@@ -52,19 +53,22 @@ impl ResultSetHandler {
 
     /// 将一行的指定列解码为 `serde_json::Value`
     ///
-    /// 按列的 `AnyTypeInfoKind` 分派；若提供 `rust_type` 且注册表中有对应处理器，
-    /// 则优先使用该处理器（用于自定义类型如 chrono/uuid）。
-    pub fn column_to_value(row: &AnyRow, index: usize, rust_type: Option<&str>) -> Result<Value> {
+    /// 按**实际值的类型种类**（而非列声明类型）分派——通过 [`AnyRow::try_get_raw`]
+    /// 读取原始值的 `type_info`，可正确处理计算列（如 `count(*)`，声明类型为 NULL
+    /// 但实际值是整数）。
+    pub fn column_to_value(row: &AnyRow, index: usize, _rust_type: Option<&str>) -> Result<Value> {
         let columns = row.columns();
-        let col = columns.get(index).ok_or_else(|| {
-            MapperRuntimeError::TypeConversion(format!("列索引 {} 越界（共 {} 列）", index, columns.len()))
-        })?;
-        let name = col.name();
-        let kind = col.type_info().kind();
+        if index >= columns.len() {
+            return Err(MapperRuntimeError::TypeConversion(format!(
+                "列索引 {} 越界（共 {} 列）", index, columns.len()
+            )));
+        }
 
-        // 若声明了 rust_type 且注册表匹配，优先走处理器（这里仅做默认表的外部传入场景；
-        // 静态分派路径在下方 match 中处理，二者结果一致）
-        let _ = (rust_type, name);
+        // 取实际值（而非列声明）的类型种类
+        let value_ref = row
+            .try_get_raw(index)
+            .map_err(decode_err("raw", index))?;
+        let kind = value_ref.type_info().kind();
 
         match kind {
             AnyTypeInfoKind::Null => Ok(Value::Null),
@@ -86,7 +90,7 @@ impl ResultSetHandler {
             AnyTypeInfoKind::Double => {
                 let v: Option<f64> = row.try_get(index).map_err(decode_err("f64", index))?;
                 Ok(v
-                    .and_then(|x| Number::from_f64(x))
+                    .and_then(Number::from_f64)
                     .map(Value::Number)
                     .unwrap_or(Value::Null))
             }

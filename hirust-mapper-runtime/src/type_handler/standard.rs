@@ -148,7 +148,7 @@ impl TypeHandler for F64Handler {
             }
         };
         Ok(val
-            .and_then(|x| Number::from_f64(x))
+            .and_then(Number::from_f64)
             .map(Value::Number)
             .unwrap_or(Value::Null))
     }

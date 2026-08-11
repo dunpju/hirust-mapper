@@ -15,7 +15,7 @@
 | P3 Registry + Environment | ✅ 已完成 | 2026-08-11 | runtime 17/17 测试通过（含 8 个新测试） |
 | P4 BoundSql 两阶段重构 | ✅ 已完成 | 2026-08-11 | core 30/30 测试通过（含 15 个 BoundSql 测试） |
 | P5 TypeHandler + 参数绑定 | ✅ 已完成 | 2026-08-11 | runtime 34/34 测试通过（含 17 个 P5 新测试） |
-| P6 Executor + SqlSession | ⬜ 待实施 | — | — |
+| P6 Executor + SqlSession | ✅ 已完成 | 2026-08-11 | runtime 34 + e2e 10 测试通过（完整 ORM 可用） |
 | P7 热重载 | ⬜ 待实施 | — | — |
 | P8 ResultMap 增强 | ⬜ 待实施 | — | — |
 | P9 Proc Macros | ⬜ 待实施 | — | — |
@@ -24,7 +24,7 @@
 **当前可在全新电脑上运行的验证命令：**
 
 ```bash
-cargo test --workspace     # 应输出 core 30 + runtime 34 = 64 个测试通过
+cargo test --workspace     # 应输出 core 30 + runtime 34 + e2e 10 = 74 个测试通过
 ```
 
 ---
@@ -35,7 +35,7 @@ cargo test --workspace     # 应输出 core 30 + runtime 34 = 64 个测试通过
    ```bash
    git clone <repo-url> hirust-mapper
    cd hirust-mapper
-   cargo test --workspace          # 确认 64 个测试全通过
+   cargo test --workspace          # 确认 74 个测试全通过
    ```
 
 2. **识别下一个待实施阶段**：查看上方"执行状态"表格，找到第一个 `⬜ 待实施` 的阶段。
@@ -82,6 +82,9 @@ hirust-mapper/
 │       ├── handler/                  # ✅ ParameterHandler + ResultSetHandler (P5)
 │       │   ├── parameter.rs
 │       │   └── result_set.rs
+│       ├── executor/                 # ✅ SimpleExecutor (泛型 sqlx 执行) (P6)
+│       │   └── simple.rs
+│       ├── session.rs                # ✅ SqlSession 全 CRUD + 事务 + MapperProxy (P6)
 │       ├── session.rs                # ⬜ SqlSession (P6)
 │       ├── executor/                 # ⬜ (P6)
 │       │   ├── simple.rs
@@ -266,54 +269,59 @@ pub trait Executor: Send + Sync {
 
 ---
 
-## 6. 运行时 API 使用示例（P6 完成后可用）
+## 6. 运行时 API 使用示例（✅ P6 已可用）
 
 ```rust
-use hirust_mapper::{SqlSessionFactory, HirustMapperConfig};
+use hirust_mapper_runtime::{SqlSessionFactory, HirustMapperConfig, MapperProxy};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use serde_json::json;
 
-#[derive(Debug, Serialize, Deserialize)]
-struct User { id: Option<i64>, name: String, email: String }
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct User { id: i64, name: String, age: i64 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. 加载配置
+async fn main() -> anyhow::Result<()> {
+    // 1. 加载配置 + 创建 SessionFactory（应用级，线程安全）
     let config = HirustMapperConfig::load_file("hirust-mapper.toml")?;
+    let factory = SqlSessionFactory::build(config, ".").await?;
 
-    // 2. 创建 SessionFactory (应用级, 线程安全)
-    let factory = SqlSessionFactory::build(config).await?;
+    // 2. 打开 Session（请求级，&mut self 用于 DB 操作）
+    let mut session = factory.open_session();
 
-    // 3. 获取 Session (请求级)
-    let mut session = factory.open_session().await?;
+    // 3. 插入（返回自增主键）
+    let id = session.insert("myapp::dao::UserDao", "insert",
+        &User { id: 0, name: "张三".into(), age: 30 }).await?;
+    println!("生成主键: {:?}", id);
 
-    // 4. 查询
+    // 4. 查询单行（多于一行报 TooManyRows）
     let mut params = HashMap::new();
-    params.insert("id".into(), json!(42));
-    let user: User = session.select_one("myapp::dao::UserDao", "findById", &params).await?;
+    params.insert("id".into(), json!(id.unwrap()));
+    let user: User = session.select_one("myapp::dao::UserDao", "findById", &params)
+        .await?.unwrap();
 
-    // 5. Mapper 代理模式
-    let dao = session.get_mapper("myapp::dao::UserDao")?;
-    let users: Vec<User> = dao.query("findByName", &params).await?;
+    // 5. 查询多行
+    let users: Vec<User> = session.select_list("myapp::dao::UserDao", "findAll", &HashMap::new())
+        .await?;
 
-    // 6. 事务
-    session.begin().await?;
-    session.insert("myapp::dao::UserDao", "insert", &new_user).await?;
-    session.commit().await?;
+    // 6. Mapper 代理（省去每次传 namespace）
+    let mut dao: MapperProxy = session.mapper("myapp::dao::UserDao")?;
+    dao.update("updateAge", &serde_json::json!({"id": id.unwrap(), "age": 31})).await?;
+
+    // 7. 事务（begin/commit/rollback）
+    let mut tx_session = factory.open_session();
+    tx_session.begin().await?;
+    tx_session.insert("myapp::dao::UserDao", "insert", &User { id: 0, name: "李四".into(), age: 25 }).await?;
+    tx_session.commit().await?; // 或 rollback()
+
+    factory.close().await;
     Ok(())
 }
 ```
 
-> **注意**：P5 已实现 TypeHandler + ParameterHandler + ResultSetHandler。P6 完成后上述完整 CRUD 流程才可用（Executor 串联各组件）。当前（P5 完成后）可手动串联：
-> ```rust
-> let factory = SqlSessionFactory::build(config, ".").await?;
-> let session = factory.open_session();
-> let bound = session.build_bound_sql("myapp::dao::UserDao", "findById", &params)?;
-> // 手动绑定 + 执行 + 映射（P6 的 Executor 将封装此流程）
-> let args = ParameterHandler::bind_arguments(&bound)?;
-> let row: sqlx::any::AnyRow = sqlx::query_with(&bound.sql, args).fetch_one(session.pool()).await?;
-> let user: User = ResultSetHandler::map_row(&row)?;
-> factory.close().await;
-> ```
+> **P6 里程碑达成**：完整 ORM 可用——加载 XML → 执行 SQL → 映射结果 → 事务管理。
+> 完整可运行端到端测试见 `hirust-mapper-runtime/tests/crud_e2e.rs`（10 个测试覆盖 CRUD + 事务提交/回滚 + MapperProxy）。
+
 
 ---
 
@@ -388,7 +396,7 @@ pub enum MapperRuntimeError {
 }
 ```
 
-P6 实施时需补充 `Database(#[from] sqlx::Error)` 变体。
+P6 已补充 `Database(#[from] sqlx::Error)` 变体（见上表注释，当前共 11 变体）。
 
 ---
 
@@ -440,14 +448,16 @@ P6 实施时需补充 `Database(#[from] sqlx::Error)` 变体。
 - [x] 占位符数量校验 `validate_placeholder_count`
 - **验证**：runtime 34/34 测试通过（含 17 个 P5 新测试，覆盖各类型 SQLite 内存库往返）
 
-### ⬜ P6: Executor + SqlSession
-- [ ] `executor/simple.rs`: SimpleExecutor (sqlx 执行)
-- [ ] `session.rs`: SqlSession 全接口 (select_one/select_list/insert/update/delete)
-- [ ] `session.rs`: MapperProxy 命名空间代理
-- [ ] 事务管理: begin/commit/rollback (基于 sqlx::Transaction)
-- [ ] MapperRuntimeError 补充 `Database(#[from] sqlx::Error)`
-- **里程碑**：完整 ORM 可用：加载 XML → 执行 SQL → 映射结果 → 事务
-- **验证**：端到端集成测试（SQLite 内存库 + 真实 CRUD）
+### ✅ P6: Executor + SqlSession
+- [x] `executor/simple.rs`: SimpleExecutor（泛型 `E: sqlx::Executor`，同时支持 pool 与事务连接）
+- [x] `session.rs`: SqlSession 全接口（select_one/select_list/insert/update/delete）
+- [x] `session.rs`: MapperProxy 命名空间代理
+- [x] 事务管理: begin/commit/rollback/close（基于 `sqlx::Transaction<'static, Any>`，close 隐式回滚）
+- [x] MapperRuntimeError 补充 `Database(#[from] sqlx::Error)`
+- [x] insert 生成主键：sqlite 同连接 `SELECT last_insert_rowid()`（Any 驱动不透传 last_insert_id）
+- [x] ResultSetHandler 改为按**实际值类型**分派（修复 `count(*)` 等计算列）
+- **里程碑**：✅ 完整 ORM 可用：加载 XML → 执行 SQL → 映射结果 → 事务
+- **验证**：runtime 34 + e2e 10 测试通过（SQLite 内存库 + 真实 CRUD + 事务提交/回滚）
 
 ### ⬜ P7: 热重载
 - [ ] 引入 notify 依赖
@@ -477,7 +487,7 @@ P6 实施时需补充 `Database(#[from] sqlx::Error)` 变体。
 - [ ] examples/proc_macro_usage.rs
 - **验证**：示例可独立编译运行
 
-**总计剩余约 9-16 个工作日（P6-P10）。**
+**总计剩余约 8-14 个工作日（P7-P10）。**
 
 ---
 
@@ -515,7 +525,7 @@ P6 实施时需补充 `Database(#[from] sqlx::Error)` 变体。
 | `HirustMapperConfig` | `hirust-mapper-runtime/src/config.rs` | TOML 配置解析 |
 | `MapperRegistry` | `hirust-mapper-runtime/src/registry.rs` | 线程安全 Mapper 注册表 |
 | `TypeAliasRegistry` | `hirust-mapper-runtime/src/registry.rs` | 类型别名解析 |
-| `MapperRuntimeError` | `hirust-mapper-runtime/src/error.rs` | 运行时错误（10 变体） |
+| `MapperRuntimeError` | `hirust-mapper-runtime/src/error.rs` | 运行时错误（11 变体，含 Database） |
 | `Environment` | `hirust-mapper-runtime/src/environment.rs` | 数据库连接池封装 (P3) |
 | `EnvironmentRegistry` | `hirust-mapper-runtime/src/environment.rs` | 多数据库环境管理 (P3) |
 | `SqlSessionFactory` | `hirust-mapper-runtime/src/session_factory.rs` | 应用级 Session 工厂 (P3) |
@@ -526,3 +536,6 @@ P6 实施时需补充 `Database(#[from] sqlx::Error)` 变体。
 | `TypeHandler` / `TypeHandlerRegistry` | `hirust-mapper-runtime/src/type_handler/` | Value↔DB 列双向转换 + 注册表 (P5) |
 | `ParameterHandler` | `hirust-mapper-runtime/src/handler/parameter.rs` | Vec<Value> → sqlx 参数绑定 (P5) |
 | `ResultSetHandler` | `hirust-mapper-runtime/src/handler/result_set.rs` | AnyRow → T: DeserializeOwned (P5) |
+| `SimpleExecutor` | `hirust-mapper-runtime/src/executor/simple.rs` | 泛型 sqlx 执行器（pool/事务） (P6) |
+| `SqlSession` (完整) | `hirust-mapper-runtime/src/session.rs` | CRUD + 事务 + MapperProxy (P6) |
+| `MapperProxy` | `hirust-mapper-runtime/src/session.rs` | 命名空间代理 (P6) |

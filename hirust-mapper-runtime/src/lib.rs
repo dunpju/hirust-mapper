@@ -8,8 +8,10 @@ pub mod bound_sql;
 pub mod config;
 pub mod environment;
 pub mod error;
+pub mod executor;
 pub mod handler;
 pub mod registry;
+pub mod session;
 pub mod session_factory;
 pub mod type_handler;
 
@@ -17,9 +19,11 @@ pub use bound_sql::BoundSql;
 pub use config::*;
 pub use environment::*;
 pub use error::*;
+pub use executor::SimpleExecutor;
 pub use handler::{ParameterHandler, ResultSetHandler};
 pub use registry::*;
-pub use session_factory::*;
+pub use session::{MapperProxy, SqlSession};
+pub use session_factory::SqlSessionFactory;
 pub use type_handler::{
     BoolHandler, F64Handler, I32Handler, I64Handler, StringHandler, TypeHandler,
     TypeHandlerRegistry,
