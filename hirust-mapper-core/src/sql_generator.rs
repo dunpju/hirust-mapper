@@ -398,7 +398,10 @@ pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P, mapper: 
 // ─── 高层便捷 API ─────────────────────────────────────────────────
 
 impl Mapper {
-    /// 一站式 SQL 生成：按 statement id 查找并生成最终 SQL
+    /// 一站式 SQL 生成：按 statement id 查找并生成最终 SQL（内联模式）
+    ///
+    /// 所有 `#{param}` / `${param}` 都直接内联到 SQL 字符串中（字符串值自动加引号）。
+    /// 这是传统的内联生成方式，向后兼容。
     ///
     /// # 示例
     /// ```ignore
@@ -419,5 +422,270 @@ impl Mapper {
                 replace_parameters(&stmt.sql, params)
             }
         }
+    }
+
+    /// 两阶段绑定：按 statement id 查找并生成 [`BoundSql`]（参数化模式）
+    ///
+    /// 与 [`build_sql`](Self::build_sql) 的区别：
+    /// - `#{param}` → 替换为 `?` 占位符，参数值按出现顺序进入 [`BoundSql::parameters`]
+    /// - `${param}` → 原样内联（无法参数化，保持原行为）
+    ///
+    /// 当 SQL 同时包含 `?` 占位符与 `${}` 内联值时即为「混合模式」（自动发生，
+    /// 无需额外标记）。建议优先使用本方法以获得参数化查询的安全性（防 SQL 注入）。
+    pub fn build_bound_sql(&self, statement_id: &str, params: &HashMap<String, Value>) -> Result<BoundSql, MapperError> {
+        let stmt = self.statements.get(statement_id)
+            .ok_or_else(|| MapperError::StatementNotFound { id: statement_id.to_string() })?;
+
+        match &stmt.dynamic_sql {
+            Some(node) => generate_bound_sql(node, params, self),
+            None => replace_parameters_bound(&stmt.sql, params),
+        }
+    }
+}
+
+// ─── BoundSql 两阶段绑定（Phase 2）──────────────────────────────────
+
+/// 绑定后的 SQL：含 `?` 占位符的 SQL 字符串 + 有序参数列表
+///
+/// 对应两阶段解析的 Phase 2（绑定阶段）输出。`?` 占位符与 `parameters`
+/// 一一对应（按出现顺序），可直接绑定到数据库驱动（如 sqlx）执行。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BoundSql {
+    /// 含 `?` 占位符的 SQL（`${}` 内联部分保持原样）
+    pub sql: String,
+    /// 有序参数列表，与 SQL 中 `?` 占位符一一对应（按出现顺序）
+    pub parameters: Vec<Value>,
+}
+
+impl BoundSql {
+    /// 创建一个带初始 SQL 的 BoundSql（参数列表为空）
+    pub fn new(sql: String) -> Self {
+        Self { sql, parameters: Vec::new() }
+    }
+
+    /// 参数数量
+    pub fn param_count(&self) -> usize {
+        self.parameters.len()
+    }
+
+    /// 是否包含参数
+    pub fn has_params(&self) -> bool {
+        !self.parameters.is_empty()
+    }
+}
+
+/// 替换 `#{...}` 为 `?` 占位符（参数进列表），`${...}` 原样内联
+///
+/// 这是 [`replace_parameters`] 的「绑定版本」：`#{}` 不再内联值，
+/// 而是输出 `?` 并将值收集到 [`BoundSql::parameters`]。
+fn replace_parameters_bound(content: &str, params: &impl ParamsAccess) -> Result<BoundSql, MapperError> {
+    // 先处理 ${...} — 原样内联（无法参数化）
+    let with_dollar = DOLLAR_PARAM_REGEX.replace_all(content, |caps: &regex::Captures| {
+        let path = &caps[1];
+        match params.get_param(path) {
+            Some(Value::String(s)) => s.to_string(),
+            Some(Value::Number(n)) => n.to_string(),
+            Some(Value::Bool(b)) => if *b { "1".to_string() } else { "0".to_string() },
+            Some(Value::Null) => "NULL".to_string(),
+            Some(v) => serde_json::to_string(v).unwrap_or_else(|_| "NULL".to_string()),
+            None => format!("/* MISSING:${} */", path),
+        }
+    }).to_string();
+
+    // 再处理 #{...} — 替换为 ? 占位符 + 参数进列表（按出现顺序）
+    let mut parameters = Vec::new();
+    let sql = PARAM_REGEX.replace_all(&with_dollar, |caps: &regex::Captures| {
+        let path = &caps[1];
+        match params.get_param(path) {
+            Some(value) => {
+                parameters.push(value.clone());
+                "?".to_string()
+            },
+            None => format!("/* MISSING:#{} */", path),
+        }
+    }).to_string();
+
+    Ok(BoundSql { sql, parameters })
+}
+
+/// 将节点序列拼接为 [`BoundSql`]，支持 bind 变量注入
+///
+/// [`join_with_spaces`] 的「绑定版本」：在拼接 SQL 文本的同时保持参数顺序。
+fn join_with_spaces_bound<P: ParamsAccess>(
+    nodes: &[DynamicSqlNode],
+    params: &P,
+    mapper: &Mapper,
+) -> Result<BoundSql, MapperError> {
+    let mut enriched = get_parent_params(params);
+    let mut result = BoundSql::new(String::new());
+
+    for n in nodes {
+        match n {
+            DynamicSqlNode::Bind { name, value } => {
+                // bind 变量：解析其 value 表达式（内联模式即可，结果作为字符串注入）
+                let resolved = replace_parameters(value, &enriched)?;
+                enriched.insert(name.clone(), Value::String(resolved));
+            },
+            _ => {
+                let child = generate_bound_sql(n, &enriched, mapper)?;
+                if !child.sql.trim().is_empty() {
+                    if !result.sql.is_empty() {
+                        result.sql.push(' ');
+                    }
+                    result.sql.push_str(&child.sql);
+                    result.parameters.extend(child.parameters);
+                }
+            },
+        }
+    }
+
+    // 合并连续空白（不影响 ? 与参数的对应关系）
+    result.sql = result.sql.split_whitespace().collect::<Vec<&str>>().join(" ");
+    Ok(result)
+}
+
+/// 生成 [`BoundSql`]（两阶段绑定的 Phase 2）
+///
+/// 与 [`generate_sql`] 结构完全一致，区别仅在于叶子节点（`Text`）的参数处理：
+/// - `#{param}` → `?` 占位符 + 参数进入 [`BoundSql::parameters`]
+/// - `${param}` → 原样内联
+///
+/// 结构节点（if/foreach/trim/where/set/choose/include/bind）的求值逻辑与
+/// [`generate_sql`] 完全相同，仅累积目标从 `String` 变为 `BoundSql`。
+pub fn generate_bound_sql<P: ParamsAccess>(
+    node: &DynamicSqlNode,
+    params: &P,
+    mapper: &Mapper,
+) -> Result<BoundSql, MapperError> {
+    match node {
+        DynamicSqlNode::Text(content) => replace_parameters_bound(content, params),
+
+        DynamicSqlNode::If { test, contents } => {
+            if evaluate_condition(test, params) {
+                join_with_spaces_bound(contents, params, mapper)
+            } else {
+                Ok(BoundSql::new(String::new()))
+            }
+        },
+
+        DynamicSqlNode::Foreach { collection, item, index, open, separator, close, contents } => {
+            let items = params.get_collection(collection)
+                .or_else(|| {
+                    params.get_param(collection).and_then(|v| {
+                        if let Value::Array(arr) = v { Some(arr) } else { None }
+                    })
+                });
+
+            let items = match items {
+                Some(arr) if !arr.is_empty() => arr,
+                _ => return Ok(BoundSql::new(String::new())),
+            };
+
+            let parent = get_parent_params(params);
+            let mut result = BoundSql::new(open.clone());
+
+            for (i, item_val) in items.iter().enumerate() {
+                if i > 0 {
+                    result.sql.push_str(separator);
+                }
+                let temp = create_temp_params(item, item_val, index, i, &parent);
+                let child = join_with_spaces_bound(contents, &temp, mapper)?;
+                result.sql.push_str(&child.sql);
+                result.parameters.extend(child.parameters);
+            }
+
+            result.sql.push_str(close);
+            Ok(result)
+        },
+
+        DynamicSqlNode::Trim { prefix, prefix_overrides, suffix, suffix_overrides, contents } => {
+            let mut bound = join_with_spaces_bound(contents, params, mapper)?;
+            bound.sql = strip_overrides(&bound.sql, prefix_overrides.as_deref(), None, true);
+            bound.sql = strip_overrides(&bound.sql, suffix_overrides.as_deref(), None, false);
+
+            if let Some(p) = prefix {
+                if !bound.sql.is_empty() && !p.trim_end().is_empty() {
+                    bound.sql = format!("{} {}", p.trim_end(), bound.sql.trim_start());
+                }
+            }
+            if let Some(s) = suffix {
+                if !bound.sql.is_empty() && !s.trim_start().is_empty() {
+                    bound.sql = format!("{} {}", bound.sql.trim_end(), s.trim_start());
+                }
+            }
+
+            Ok(bound)
+        },
+
+        DynamicSqlNode::Choose { whens, otherwise } => {
+            for (condition, contents) in whens {
+                if evaluate_condition(condition, params) {
+                    return join_with_spaces_bound(contents, params, mapper);
+                }
+            }
+            match otherwise {
+                Some(contents) => join_with_spaces_bound(contents, params, mapper),
+                None => Ok(BoundSql::new(String::new())),
+            }
+        },
+
+        DynamicSqlNode::Bind { .. } => Ok(BoundSql::new(String::new())),
+
+        DynamicSqlNode::Include { ref_id } => {
+            let fragment = if ref_id.contains('.') {
+                let (_ns, id) = ref_id.split_once('.')
+                    .ok_or_else(|| MapperError::MissingFragment { ref_id: ref_id.clone() })?;
+                mapper.sql_fragments.get(id)
+                    .ok_or_else(|| MapperError::MissingFragment { ref_id: ref_id.clone() })?
+            } else {
+                mapper.sql_fragments.get(ref_id)
+                    .ok_or_else(|| MapperError::MissingFragment { ref_id: ref_id.clone() })?
+            };
+
+            let parts: Vec<BoundSql> = fragment.iter()
+                .map(|node| generate_bound_sql(node, params, mapper))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let mut result = BoundSql::new(String::new());
+            for part in parts {
+                if part.sql.trim().is_empty() { continue; }
+                if !result.sql.is_empty() {
+                    result.sql.push(' ');
+                }
+                result.sql.push_str(&part.sql);
+                result.parameters.extend(part.parameters);
+            }
+            Ok(result)
+        },
+
+        DynamicSqlNode::Where { prefix_overrides, suffix_overrides, contents } => {
+            let mut bound = join_with_spaces_bound(contents, params, mapper)?;
+            bound.sql = strip_overrides(&bound.sql, prefix_overrides.as_deref(), Some("AND |OR "), true);
+            bound.sql = strip_overrides(&bound.sql, suffix_overrides.as_deref(), None, false);
+
+            if bound.sql.is_empty() {
+                Ok(bound)
+            } else {
+                bound.sql = format!("WHERE {}", bound.sql.trim_start());
+                Ok(bound)
+            }
+        },
+
+        DynamicSqlNode::Set { prefix_overrides, suffix_overrides, contents } => {
+            let mut bound = join_with_spaces_bound(contents, params, mapper)?;
+            bound.sql = strip_overrides(&bound.sql, prefix_overrides.as_deref(), None, true);
+            bound.sql = strip_overrides(&bound.sql, suffix_overrides.as_deref(), Some(","), false);
+
+            if bound.sql.is_empty() {
+                Ok(bound)
+            } else {
+                bound.sql = format!("SET {}", bound.sql.trim_start());
+                Ok(bound)
+            }
+        },
+
+        DynamicSqlNode::Mixed { contents } => {
+            join_with_spaces_bound(contents, params, mapper)
+        },
     }
 }

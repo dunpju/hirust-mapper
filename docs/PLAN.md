@@ -13,8 +13,8 @@
 | P1 Workspace 重构 | ✅ 已完成 | 2026-08-10 | core 15/15 测试通过 |
 | P2 配置系统 | ✅ 已完成 | 2026-08-10 | runtime 9/9 测试通过 |
 | P3 Registry + Environment | ✅ 已完成 | 2026-08-11 | runtime 17/17 测试通过（含 8 个新测试） |
-| P4 BoundSql 两阶段重构 | ⬜ 待实施 | — | — |
-| P5 TypeHandler + 参数绑定 | ⬜ 待实施 | — | — |
+| P4 BoundSql 两阶段重构 | ✅ 已完成 | 2026-08-11 | core 30/30 测试通过（含 15 个 BoundSql 测试） |
+| P5 TypeHandler + 参数绑定 | ✅ 已完成 | 2026-08-11 | runtime 34/34 测试通过（含 17 个 P5 新测试） |
 | P6 Executor + SqlSession | ⬜ 待实施 | — | — |
 | P7 热重载 | ⬜ 待实施 | — | — |
 | P8 ResultMap 增强 | ⬜ 待实施 | — | — |
@@ -24,7 +24,7 @@
 **当前可在全新电脑上运行的验证命令：**
 
 ```bash
-cargo test --workspace     # 应输出 core 15 + runtime 17 = 32 个测试通过
+cargo test --workspace     # 应输出 core 30 + runtime 34 = 64 个测试通过
 ```
 
 ---
@@ -35,7 +35,7 @@ cargo test --workspace     # 应输出 core 15 + runtime 17 = 32 个测试通过
    ```bash
    git clone <repo-url> hirust-mapper
    cd hirust-mapper
-   cargo test --workspace          # 确认 32 个测试全通过
+   cargo test --workspace          # 确认 64 个测试全通过
    ```
 
 2. **识别下一个待实施阶段**：查看上方"执行状态"表格，找到第一个 `⬜ 待实施` 的阶段。
@@ -66,7 +66,7 @@ hirust-mapper/
 │   └── src/
 │       ├── model.rs                  # Mapper, DynamicSqlNode, MapperError
 │       ├── parser.rs                 # MyBatisXmlParser
-│       └── sql_generator.rs         # generate_sql + build_sql
+│       └── sql_generator.rs         # generate_sql + build_sql + generate_bound_sql + BoundSql (P4)
 │
 ├── hirust-mapper-runtime/            # ORM 运行时（部分已实现）
 │   └── src/
@@ -75,6 +75,13 @@ hirust-mapper/
 │       ├── registry.rs               # ✅ MapperRegistry + TypeAliasRegistry
 │       ├── environment.rs            # ✅ Environment + EnvironmentRegistry (P3)
 │       ├── session_factory.rs        # ✅ SqlSessionFactory + SqlSession (P3)
+│       ├── bound_sql.rs              # ✅ BoundSql 重新导出 + 便捷绑定 (P4)
+│       ├── type_handler/             # ✅ TypeHandler trait + 标准/可选处理器 (P5)
+│       │   ├── trait_def.rs
+│       │   └── standard.rs
+│       ├── handler/                  # ✅ ParameterHandler + ResultSetHandler (P5)
+│       │   ├── parameter.rs
+│       │   └── result_set.rs
 │       ├── session.rs                # ⬜ SqlSession (P6)
 │       ├── executor/                 # ⬜ (P6)
 │       │   ├── simple.rs
@@ -122,7 +129,7 @@ hirust-mapper (facade) → 依赖 → core + runtime(可选) + macros(可选)
 | sqlx | 0.8 | 数据库执行层 | ✅ P3 已引入 |
 | tokio | 1 | async runtime | ✅ P3 已引入 |
 | notify | 7 | 文件变更监控/热重载 | ⬜ P7 引入 |
-| chrono/uuid | 0.4/1 | 可选类型处理器 | ⬜ P5 引入 |
+| chrono/uuid | 0.4/1 | 可选类型处理器 | ✅ P5 已引入（feature-gated） |
 
 ---
 
@@ -243,18 +250,19 @@ pub trait Executor: Send + Sync {
 
 ---
 
-## 5. 两阶段 SQL 解析（P4 待实施）
+## 5. 两阶段 SQL 解析（P4 已完成）
 
-现有 `generate_sql` 直接内联值。P4 重构为两阶段：
+`generate_sql`（内联模式）与 `generate_bound_sql`（绑定模式）并存：
 
 | 阶段 | 时机 | 输出 |
 |------|------|------|
 | Phase 1: 解析 | 启动时 | `Mapper` (DynamicSqlNode AST) — ✅ 现有代码 |
-| Phase 2: 绑定 | 每次查询时 | `BoundSql { sql: String(含?占位符), params: Vec<BoundParameter> }` — ⬜ P4 |
+| Phase 2: 绑定 | 每次查询时 | `BoundSql { sql: String(含?占位符), parameters: Vec<Value> }` — ✅ P4 |
 
-- `#{param}` → `?` 占位符 + 参数加入列表
+- `#{param}` → `?` 占位符 + 参数按出现顺序进入 `parameters` 列表
 - `${param}` → 原样内联（无法参数化的部分保持内联模式）
-- 检测到 `${}` 时自动降级为混合模式（部分内联 + 部分 ?）
+- 检测到 `${}` 时自动降级为混合模式（部分内联 + 部分 ?，自动发生）
+- `build_sql`（内联）与 `build_bound_sql`（绑定）并行提供，向后兼容
 
 ---
 
@@ -295,14 +303,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-> **注意**：P3 已实现 Environment + SessionFactory。P4-P6 完成后上述完整 CRUD 流程才可用。当前（P3 完成后）可用的流程是：
+> **注意**：P5 已实现 TypeHandler + ParameterHandler + ResultSetHandler。P6 完成后上述完整 CRUD 流程才可用（Executor 串联各组件）。当前（P5 完成后）可手动串联：
 > ```rust
-> let config = HirustMapperConfig::load_file("hirust-mapper.toml")?;
 > let factory = SqlSessionFactory::build(config, ".").await?;
 > let session = factory.open_session();
-> let mapper = session.get_mapper("myapp::dao::UserDao")?;
-> let sql = mapper.build_sql("findById", &params)?;
-> // sql 查询和结果映射需 P4-P6 支持
+> let bound = session.build_bound_sql("myapp::dao::UserDao", "findById", &params)?;
+> // 手动绑定 + 执行 + 映射（P6 的 Executor 将封装此流程）
+> let args = ParameterHandler::bind_arguments(&bound)?;
+> let row: sqlx::any::AnyRow = sqlx::query_with(&bound.sql, args).fetch_one(session.pool()).await?;
+> let user: User = ResultSetHandler::map_row(&row)?;
 > factory.close().await;
 > ```
 
@@ -411,21 +420,25 @@ P6 实施时需补充 `Database(#[from] sqlx::Error)` 变体。
 - **里程碑**：能从 TOML 配置启动，加载所有 mapper，创建 SessionFactory
 - **验证**：runtime 17/17 测试通过（含 8 个 P3 新测试）
 
-### ⬜ P4: BoundSql 两阶段重构
-- [ ] 新增 `bound_sql.rs`: `BoundSql { sql, params }` 结构
-- [ ] 重构 `generate_sql` → 新增 `generate_bound_sql` 输出 BoundSql
-- [ ] `#{param}` → `?` 占位符 + 参数进列表
-- [ ] `${param}` 保持内联（检测到则标记混合模式）
-- [ ] 保持 `build_sql`（内联模式）向后兼容
-- **验证**：core 15 测试仍通过 + 新增 BoundSql 测试
+### ✅ P4: BoundSql 两阶段重构
+- [x] core 新增 `BoundSql { sql, parameters }` 结构（sql_generator.rs）
+- [x] 新增 `generate_bound_sql` / `replace_parameters_bound` / `join_with_spaces_bound`
+- [x] `#{param}` → `?` 占位符 + 参数按出现顺序进列表
+- [x] `${param}` 保持原样内联（与 `#{}` 同时出现即自动混合模式）
+- [x] `Mapper::build_bound_sql` 高层 API + core lib.rs 导出
+- [x] runtime `bound_sql.rs` 重新导出 + `SqlSession::build_bound_sql` 便捷方法
+- [x] 保持 `build_sql`（内联模式）完全向后兼容
+- **验证**：core 30/30 测试通过（原 15 + 新增 15 个 BoundSql 测试）
 
-### ⬜ P5: TypeHandler + 参数绑定
-- [ ] `type_handler/trait_def.rs`: TypeHandler trait
-- [ ] `type_handler/standard.rs`: i32/i64/String/bool/f64 内置 handler
-- [ ] feature-gated: ChronoHandler, UuidHandler
-- [ ] `handler/parameter.rs`: ParameterHandler (Value → sqlx bind)
-- [ ] `handler/result_set.rs`: ResultSetHandler (Row → T via serde)
-- **验证**：单元测试覆盖每种类型的双向转换
+### ✅ P5: TypeHandler + 参数绑定
+- [x] `type_handler/trait_def.rs`: TypeHandler trait（type_name / get_result / set_parameter）
+- [x] `type_handler/standard.rs`: I32/I64/String/Bool/F64 内置 handler + TypeHandlerRegistry
+- [x] feature-gated: ChronoHandler（`chrono`）/ UuidHandler（`uuid`）
+- [x] `handler/parameter.rs`: ParameterHandler（Vec<Value> → sqlx::AnyArguments 绑定）
+- [x] `handler/result_set.rs`: ResultSetHandler（AnyRow → Value::Object → T: DeserializeOwned，按 AnyTypeInfoKind 分派）
+- [x] `bind_value` 按 Value 变体分派 JSON → sqlx 原语类型
+- [x] 占位符数量校验 `validate_placeholder_count`
+- **验证**：runtime 34/34 测试通过（含 17 个 P5 新测试，覆盖各类型 SQLite 内存库往返）
 
 ### ⬜ P6: Executor + SqlSession
 - [ ] `executor/simple.rs`: SimpleExecutor (sqlx 执行)
@@ -464,7 +477,7 @@ P6 实施时需补充 `Database(#[from] sqlx::Error)` 变体。
 - [ ] examples/proc_macro_usage.rs
 - **验证**：示例可独立编译运行
 
-**总计剩余约 15-23 个工作日（P4-P10）。**
+**总计剩余约 9-16 个工作日（P6-P10）。**
 
 ---
 
@@ -507,3 +520,9 @@ P6 实施时需补充 `Database(#[from] sqlx::Error)` 变体。
 | `EnvironmentRegistry` | `hirust-mapper-runtime/src/environment.rs` | 多数据库环境管理 (P3) |
 | `SqlSessionFactory` | `hirust-mapper-runtime/src/session_factory.rs` | 应用级 Session 工厂 (P3) |
 | `SqlSession` | `hirust-mapper-runtime/src/session_factory.rs` | 请求级轻量 Session (P3) |
+| `BoundSql` | `hirust-mapper-core/src/sql_generator.rs` | 参数化绑定 SQL (?+参数列表) (P4) |
+| `generate_bound_sql` | `hirust-mapper-core/src/sql_generator.rs` | 两阶段绑定 Phase 2 (P4) |
+| `build_bound_sql` | `core: Mapper::build_bound_sql` / `runtime: SqlSession::build_bound_sql` | 绑定 SQL 生成入口 (P4) |
+| `TypeHandler` / `TypeHandlerRegistry` | `hirust-mapper-runtime/src/type_handler/` | Value↔DB 列双向转换 + 注册表 (P5) |
+| `ParameterHandler` | `hirust-mapper-runtime/src/handler/parameter.rs` | Vec<Value> → sqlx 参数绑定 (P5) |
+| `ResultSetHandler` | `hirust-mapper-runtime/src/handler/result_set.rs` | AnyRow → T: DeserializeOwned (P5) |

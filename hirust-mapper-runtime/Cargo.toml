@@ -15,9 +15,16 @@ toml = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio", "any"] }
 tokio = { workspace = true }
 
+# 可选类型处理器依赖
+chrono = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+
 [features]
 default = ["sqlite"]
 # 数据库后端 feature gates
 mysql = ["sqlx/mysql"]
 postgres = ["sqlx/postgres"]
 sqlite = ["sqlx/sqlite"]
+# 可选类型处理器
+chrono = ["dep:chrono"]
+uuid = ["dep:uuid"]

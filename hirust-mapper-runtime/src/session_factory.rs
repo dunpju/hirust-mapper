@@ -218,6 +218,20 @@ impl SqlSession {
             .ok_or_else(|| MapperRuntimeError::MapperNotFound(namespace.to_string()))
     }
 
+    /// 两阶段绑定：生成 [`BoundSql`]（`#{}` → `?`，`${}` → 内联）
+    ///
+    /// 根据 namespace + statement id 查找 Mapper，再按参数生成参数化 SQL。
+    /// 这是 P6 Executor 执行层的输入。
+    pub fn build_bound_sql(
+        &self,
+        namespace: &str,
+        statement_id: &str,
+        params: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<crate::bound_sql::BoundSql> {
+        let mapper = self.get_mapper(namespace)?;
+        crate::bound_sql::build_bound_sql(&mapper, statement_id, params)
+    }
+
     /// 关闭 session
     pub fn close(&mut self) {
         self.closed = true;

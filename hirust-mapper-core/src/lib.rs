@@ -13,6 +13,8 @@ pub use model::*;
 pub use parser::*;
 pub use sql_generator::ParamsAccess;
 pub use sql_generator::generate_sql;
+pub use sql_generator::generate_bound_sql;
+pub use sql_generator::BoundSql;
 
 #[cfg(test)]
 mod tests {
@@ -332,5 +334,327 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("foo"), "Error message: {}", msg);
         assert!(msg.contains("findUser"), "Error message: {}", msg);
+    }
+
+    // ─── BoundSql（P4）测试 ─────────────────────────────────────────
+
+    /// 辅助：解析 XML 并生成 BoundSql
+    fn build_bound(xml: &str, stmt_id: &str, params: &HashMap<String, Value>) -> BoundSql {
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+        mapper.build_bound_sql(stmt_id, params).unwrap()
+    }
+
+    #[test]
+    fn bound_sql_hash_becomes_placeholder() {
+        let xml = r#"<mapper namespace="t">
+        <select id="findById">SELECT * FROM users WHERE id = #{id}</select>
+        </mapper>"#;
+
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), Value::Number(42.into()));
+
+        let bound = build_bound(xml, "findById", &params);
+        assert_eq!(bound.sql, "SELECT * FROM users WHERE id = ?");
+        assert_eq!(bound.param_count(), 1);
+        assert_eq!(bound.parameters[0], Value::Number(42.into()));
+    }
+
+    #[test]
+    fn bound_sql_string_param_not_inlined() {
+        // 关键差异：字符串值不再内联加引号，而是作为参数
+        let xml = r#"<mapper namespace="t">
+        <select id="findByName">SELECT * FROM users WHERE name = #{name}</select>
+        </mapper>"#;
+
+        let mut params = HashMap::new();
+        params.insert("name".to_string(), Value::String("O'Brien".to_string()));
+
+        let bound = build_bound(xml, "findByName", &params);
+        assert_eq!(bound.sql, "SELECT * FROM users WHERE name = ?");
+        assert_eq!(bound.parameters[0], Value::String("O'Brien".to_string()));
+        // 验证 SQL 中不含内联的引号或转义
+        assert!(!bound.sql.contains("O'Brien"), "SQL should not inline value: {}", bound.sql);
+    }
+
+    #[test]
+    fn bound_sql_dollar_still_inlined() {
+        // ${} 必须保持内联行为（如动态表名 / 排序字段）
+        let xml = r#"<mapper namespace="t">
+        <select id="dynamic">SELECT * FROM ${table} ORDER BY ${col}</select>
+        </mapper>"#;
+
+        let mut params = HashMap::new();
+        params.insert("table".to_string(), Value::String("users".to_string()));
+        params.insert("col".to_string(), Value::String("name".to_string()));
+
+        let bound = build_bound(xml, "dynamic", &params);
+        assert_eq!(bound.sql, "SELECT * FROM users ORDER BY name");
+        assert_eq!(bound.param_count(), 0); // ${} 不产生参数
+    }
+
+    #[test]
+    fn bound_sql_mixed_mode_hash_and_dollar() {
+        // 混合模式：同时包含 #{} (?) 和 ${} (内联)
+        let xml = r#"<mapper namespace="t">
+        <select id="mixed">SELECT * FROM ${table} WHERE id = #{id} AND status = #{status}</select>
+        </mapper>"#;
+
+        let mut params = HashMap::new();
+        params.insert("table".to_string(), Value::String("orders".to_string()));
+        params.insert("id".to_string(), Value::Number(7.into()));
+        params.insert("status".to_string(), Value::String("active".to_string()));
+
+        let bound = build_bound(xml, "mixed", &params);
+        assert_eq!(bound.sql, "SELECT * FROM orders WHERE id = ? AND status = ?");
+        assert_eq!(bound.param_count(), 2);
+        // 参数顺序与 ? 出现顺序一致
+        assert_eq!(bound.parameters[0], Value::Number(7.into()));
+        assert_eq!(bound.parameters[1], Value::String("active".to_string()));
+    }
+
+    #[test]
+    fn bound_sql_param_order_preserved() {
+        // 多个 #{param} 的顺序必须与 ? 出现顺序严格对应
+        let xml = r#"<mapper namespace="t">
+        <select id="insert">INSERT INTO t (a, b, c, d) VALUES (#{a}, #{b}, #{c}, #{d})</select>
+        </mapper>"#;
+
+        let mut params = HashMap::new();
+        params.insert("a".to_string(), Value::Number(1.into()));
+        params.insert("b".to_string(), Value::String("two".to_string()));
+        params.insert("c".to_string(), Value::Bool(true));
+        params.insert("d".to_string(), Value::Number(4.into()));
+
+        let bound = build_bound(xml, "insert", &params);
+        assert_eq!(bound.sql, "INSERT INTO t (a, b, c, d) VALUES (?, ?, ?, ?)");
+        assert_eq!(bound.param_count(), 4);
+        assert_eq!(bound.parameters[0], Value::Number(1.into()));
+        assert_eq!(bound.parameters[1], Value::String("two".to_string()));
+        assert_eq!(bound.parameters[2], Value::Bool(true));
+        assert_eq!(bound.parameters[3], Value::Number(4.into()));
+    }
+
+    #[test]
+    fn bound_sql_foreach_placeholder_count() {
+        // foreach 展开应产生与元素数相等的 ? 占位符
+        let xml = r#"<mapper namespace="t">
+        <select id="inClause">
+            SELECT * FROM tab1 WHERE column1 IN
+            <foreach collection="list" item="item" open="(" separator="," close=")">
+                #{item}
+            </foreach>
+        </select>
+        </mapper>"#;
+
+        let mut params = HashMap::new();
+        params.insert("list".to_string(), Value::Array(vec![
+            Value::Number(1.into()), Value::Number(2.into()), Value::Number(3.into()),
+        ]));
+
+        let bound = build_bound(xml, "inClause", &params);
+        assert_eq!(bound.sql, "SELECT * FROM tab1 WHERE column1 IN (?,?,?)");
+        assert_eq!(bound.param_count(), 3);
+        assert_eq!(bound.parameters[0], Value::Number(1.into()));
+        assert_eq!(bound.parameters[2], Value::Number(3.into()));
+    }
+
+    #[test]
+    fn bound_sql_if_conditional() {
+        let xml = r#"<mapper namespace="t">
+        <select id="find">
+            SELECT * FROM users WHERE 1=1
+            <if test="id != null">AND id = #{id}</if>
+            <if test="name != null and name != ''">AND name = #{name}</if>
+        </select>
+        </mapper>"#;
+
+        // 仅 id 存在
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), Value::Number(1.into()));
+        let bound = build_bound(xml, "find", &params);
+        assert_eq!(bound.sql, "SELECT * FROM users WHERE 1=1 AND id = ?");
+        assert_eq!(bound.param_count(), 1);
+
+        // id + name 都存在
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), Value::Number(1.into()));
+        params.insert("name".to_string(), Value::String("张三".to_string()));
+        let bound = build_bound(xml, "find", &params);
+        assert_eq!(bound.sql, "SELECT * FROM users WHERE 1=1 AND id = ? AND name = ?");
+        assert_eq!(bound.param_count(), 2);
+    }
+
+    #[test]
+    fn bound_sql_where_and_set_tags() {
+        let xml = r#"<mapper namespace="t">
+        <update id="update">
+            UPDATE users
+            <set>
+                <if test="name != null">name = #{name},</if>
+                <if test="age != null">age = #{age},</if>
+            </set>
+            <where>
+                <if test="id != null">id = #{id}</if>
+            </where>
+        </update>
+        </mapper>"#;
+
+        let mut params = HashMap::new();
+        params.insert("name".to_string(), Value::String("李四".to_string()));
+        params.insert("age".to_string(), Value::Number(30.into()));
+        params.insert("id".to_string(), Value::Number(5.into()));
+
+        let bound = build_bound(xml, "update", &params);
+        // SET 后逗号被剥离，WHERE 前缀正确
+        assert!(bound.sql.contains("SET name = ?, age = ?"), "SQL: {}", bound.sql);
+        assert!(bound.sql.contains("WHERE id = ?"), "SQL: {}", bound.sql);
+        assert!(!bound.sql.contains(",,"), "no double comma: {}", bound.sql);
+        assert_eq!(bound.param_count(), 3);
+        // 顺序：name, age, id
+        assert_eq!(bound.parameters[0], Value::String("李四".to_string()));
+        assert_eq!(bound.parameters[1], Value::Number(30.into()));
+        assert_eq!(bound.parameters[2], Value::Number(5.into()));
+    }
+
+    #[test]
+    fn bound_sql_choose_with_dollar() {
+        // choose 中 when 使用 ${} (内联)，otherwise 用字面量
+        let xml = r#"<mapper namespace="t">
+        <select id="q">
+            SELECT * FROM t WHERE 1=1
+            <choose>
+                <when test="filter != null">AND id IN (${filter})</when>
+                <otherwise>AND id = #{defaultId}</otherwise>
+            </choose>
+        </select>
+        </mapper>"#;
+
+        // when 分支命中 → ${} 内联，无参数
+        let mut params = HashMap::new();
+        params.insert("filter".to_string(), Value::String("1,2,3".to_string()));
+        let bound = build_bound(xml, "q", &params);
+        assert_eq!(bound.sql, "SELECT * FROM t WHERE 1=1 AND id IN (1,2,3)");
+        assert_eq!(bound.param_count(), 0);
+
+        // otherwise 分支 → defaultId 参数化（filter 不存在 → 走 otherwise）
+        let mut params2 = HashMap::new();
+        params2.insert("defaultId".to_string(), Value::Number(99.into()));
+        let bound = build_bound(xml, "q", &params2);
+        assert_eq!(bound.sql, "SELECT * FROM t WHERE 1=1 AND id = ?");
+        assert_eq!(bound.param_count(), 1);
+        assert_eq!(bound.parameters[0], Value::Number(99.into()));
+
+        // 缺失参数 → 标记，不产生 ?（otherwise 命中但 defaultId 缺失）
+        let bound_missing = build_bound(xml, "q", &HashMap::new());
+        assert!(bound_missing.sql.contains("MISSING"), "SQL: {}", bound_missing.sql);
+        assert_eq!(bound_missing.param_count(), 0);
+    }
+
+    #[test]
+    fn bound_sql_bind_tag() {
+        let xml = r#"<mapper namespace="t">
+        <select id="like">
+            <bind name="pattern" value="%${name}%"/>
+            SELECT * FROM t WHERE name LIKE #{pattern}
+        </select>
+        </mapper>"#;
+
+        let mut params = HashMap::new();
+        params.insert("name".to_string(), Value::String("test".to_string()));
+
+        let bound = build_bound(xml, "like", &params);
+        assert_eq!(bound.sql, "SELECT * FROM t WHERE name LIKE ?");
+        assert_eq!(bound.param_count(), 1);
+        // bind 解析后 pattern = "%test%"（${name} 内联为 test），作为参数
+        match &bound.parameters[0] {
+            Value::String(s) => assert!(s.contains("test"), "pattern: {}", s),
+            other => panic!("expected string param, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn bound_sql_include_fragment() {
+        let xml = r#"<mapper namespace="t">
+        <sql id="cols">a, b, c</sql>
+        <select id="sel">SELECT <include refid="cols"/> FROM tab WHERE id = #{id}</select>
+        </mapper>"#;
+
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), Value::Number(9.into()));
+
+        let bound = build_bound(xml, "sel", &params);
+        assert_eq!(bound.sql, "SELECT a, b, c FROM tab WHERE id = ?");
+        assert_eq!(bound.param_count(), 1);
+    }
+
+    #[test]
+    fn bound_sql_missing_param_marker() {
+        // 缺失参数：保持与内联模式一致的 MISSING 标记，且不产生多余的 ?
+        let xml = r#"<mapper namespace="t">
+        <select id="m">SELECT #{missing}</select>
+        </mapper>"#;
+
+        let bound = build_bound(xml, "m", &HashMap::new());
+        assert!(bound.sql.contains("/* MISSING:#missing */"), "SQL: {}", bound.sql);
+        assert_eq!(bound.param_count(), 0); // 缺失参数不进列表
+    }
+
+    #[test]
+    fn bound_sql_static_statement() {
+        // 纯静态 SQL（无 dynamic_sql）也应走绑定路径
+        let xml = r#"<mapper namespace="t">
+        <select id="static">SELECT * FROM t WHERE a = #{a} AND b = #{b}</select>
+        </mapper>"#;
+
+        let mut params = HashMap::new();
+        params.insert("a".to_string(), Value::Number(1.into()));
+        params.insert("b".to_string(), Value::String("x".to_string()));
+
+        let bound = build_bound(xml, "static", &params);
+        assert_eq!(bound.sql, "SELECT * FROM t WHERE a = ? AND b = ?");
+        assert_eq!(bound.param_count(), 2);
+    }
+
+    #[test]
+    fn bound_sql_no_params() {
+        // 无任何占位符的 SQL
+        let xml = r#"<mapper namespace="t">
+        <select id="all">SELECT * FROM t</select>
+        </mapper>"#;
+
+        let bound = build_bound(xml, "all", &HashMap::new());
+        assert_eq!(bound.sql, "SELECT * FROM t");
+        assert!(!bound.has_params());
+        assert_eq!(bound.param_count(), 0);
+    }
+
+    #[test]
+    fn bound_sql_consistent_with_inline_for_structure() {
+        // 验证：结构上 bound.sql 去掉 ? 替换后，与内联模式的非值部分一致
+        // （验证绑定模式没有破坏动态结构的求值）
+        let xml = r#"<mapper namespace="t">
+        <select id="q">
+            SELECT * FROM users
+            <where>
+                <if test="id != null">AND id = #{id}</if>
+                <if test="name != null">AND name = #{name}</if>
+            </where>
+        </select>
+        </mapper>"#;
+
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), Value::Number(1.into()));
+        params.insert("name".to_string(), Value::String("a".to_string()));
+
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+        let inline = mapper.build_sql("q", &params).unwrap();
+        let bound = mapper.build_bound_sql("q", &params).unwrap();
+
+        // 内联模式: ...WHERE id = 1 AND name = 'a'
+        // 绑定模式: ...WHERE id = ? AND name = ?
+        // 结构前缀（WHERE/AND）应一致
+        assert!(inline.contains("WHERE id ="), "inline: {}", inline);
+        assert!(bound.sql.contains("WHERE id = ?"), "bound: {}", bound.sql);
+        assert!(bound.sql.contains("AND name = ?"), "bound: {}", bound.sql);
     }
 }
