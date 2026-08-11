@@ -8,6 +8,8 @@ use std::io::Cursor;
 pub struct MyBatisXmlParser {
     reader: Reader<Cursor<Vec<u8>>>,
     buf: Vec<u8>,
+    /// 语句体解析期间捕获的 selectKey（瞬态，每条语句重置）
+    captured_select_key: Option<SelectKey>,
 }
 
 /// 从XML标签中按名称查找属性值
@@ -41,6 +43,7 @@ impl MyBatisXmlParser {
         MyBatisXmlParser {
             reader,
             buf: Vec::new(),
+            captured_select_key: None,
         }
     }
 
@@ -127,6 +130,7 @@ impl MyBatisXmlParser {
 
         let mut sql_buffer = String::new();
         let mut dynamic_nodes = Vec::new();
+        self.captured_select_key = None;
         self.parse_sql_content(&mut sql_buffer, &mut dynamic_nodes)?;
 
         stmt.sql = sql_buffer;
@@ -141,6 +145,7 @@ impl MyBatisXmlParser {
         }
 
         stmt.parameters = Self::extract_parameters(&stmt.sql);
+        stmt.select_key = self.captured_select_key.take();
 
         Ok(stmt)
     }
@@ -261,6 +266,35 @@ impl MyBatisXmlParser {
                 }
                 // 自闭合的choose无意义，忽略
             },
+            b"selectKey" => {
+                // 解析 selectKey，捕获但不加入 SQL 节点
+                let key_property = get_attr(e, b"keyProperty", "<selectKey>缺少keyProperty属性")?;
+                let result_type = get_attr(e, b"resultType", "").unwrap_or_default();
+                let order_str = get_attr(e, b"order", "").unwrap_or_default();
+                let order = if order_str.eq_ignore_ascii_case("BEFORE") {
+                    SelectKeyOrder::Before
+                } else {
+                    SelectKeyOrder::After
+                };
+                let mut sk_sql = String::new();
+                let mut sk_nodes = Vec::new();
+                if has_body {
+                    self.parse_sql_content(&mut sk_sql, &mut sk_nodes)?;
+                }
+                // selectKey 的 SQL：优先用动态生成（简单情况即静态文本）
+                let sql = if sk_nodes.is_empty() {
+                    sk_sql
+                } else {
+                    // 动态 selectKey：用 generate_sql 渲染空参数（兜底）
+                    sk_sql.trim().to_string()
+                };
+                self.captured_select_key = Some(SelectKey {
+                    key_property,
+                    result_type,
+                    order,
+                    sql: sql.trim().to_string(),
+                });
+            },
             _ => {
                 // 未知标签，跳过（有body时需要跳过子树）
                 if has_body {
@@ -322,39 +356,109 @@ impl MyBatisXmlParser {
             }
         }
 
+        self.parse_mapping_body(&mut result_map.result_columns, &mut result_map.associations, &mut result_map.collections)?;
+
+        Ok(result_map)
+    }
+
+    /// 解析 resultMap / 嵌套映射的公共子体
+    ///
+    /// 处理 `<id>`/`<result>`/`<association>`/`<collection>`（同时支持 Start 与 Empty 自闭合形式）。
+    fn parse_mapping_body(
+        &mut self,
+        result_columns: &mut Vec<ResultColumn>,
+        associations: &mut Vec<NestedMapping>,
+        collections: &mut Vec<NestedMapping>,
+    ) -> Result<(), MapperError> {
         loop {
             match self.reader.read_event_into(&mut self.buf) {
-                Ok(Event::Start(e)) => match e.name().as_ref() {
-                    b"result" => {
-                        let mut column = ResultColumn {
-                            property: String::new(),
-                            column: String::new(),
-                            java_type: None,
-                            jdbc_type: None,
-                        };
-                        for attr in e.attributes() {
-                            let attr = attr.map_err(|e| MapperError::ParseError { message: e.to_string() })?;
-                            match attr.key.as_ref() {
-                                b"property" => column.property = bytes_to_str(&attr.value)?,
-                                b"column" => column.column = bytes_to_str(&attr.value)?,
-                                b"javaType" => column.java_type = Some(bytes_to_str(&attr.value)?),
-                                b"jdbcType" => column.jdbc_type = Some(bytes_to_str(&attr.value)?),
-                                _ => {}
-                            }
-                        }
-                        result_map.result_columns.push(column);
-                        self.reader.read_event_into(&mut self.buf)?;
-                    },
-                    _ => { self.skip_element()?; }
-                },
+                Ok(Event::Start(e)) => {
+                    let e = e.into_owned();
+                    self.handle_mapping_element(&e, result_columns, associations, collections, true)?;
+                }
+                Ok(Event::Empty(e)) => {
+                    let e = e.into_owned();
+                    self.handle_mapping_element(&e, result_columns, associations, collections, false)?;
+                }
                 Ok(Event::End(_)) => break,
                 Ok(Event::Eof) => break,
                 Err(e) => return Err(MapperError::from(e)),
                 _ => {}
             }
         }
+        Ok(())
+    }
 
-        Ok(result_map)
+    /// 处理单个映射元素（id/result/association/collection）
+    fn handle_mapping_element(
+        &mut self,
+        e: &BytesStart,
+        result_columns: &mut Vec<ResultColumn>,
+        associations: &mut Vec<NestedMapping>,
+        collections: &mut Vec<NestedMapping>,
+        has_body: bool,
+    ) -> Result<(), MapperError> {
+        match e.name().as_ref() {
+            b"id" | b"result" => {
+                let is_id = e.name().as_ref() == b"id";
+                let column = self.parse_result_column(e, is_id)?;
+                result_columns.push(column);
+                // Start 形式需消费闭合标签（Empty 无标签体）
+                if has_body {
+                    self.skip_element()?;
+                }
+            }
+            b"association" | b"collection" => {
+                let is_collection = e.name().as_ref() == b"collection";
+                let mut nm = NestedMapping::default();
+                for attr in e.attributes() {
+                    let attr = attr.map_err(|e| MapperError::ParseError { message: e.to_string() })?;
+                    match attr.key.as_ref() {
+                        b"property" => nm.property = bytes_to_str(&attr.value)?,
+                        b"column" => nm.column = Some(bytes_to_str(&attr.value)?),
+                        b"javaType" | b"ofType" | b"resultType" => {
+                            nm.nested_type = Some(bytes_to_str(&attr.value)?);
+                        }
+                        b"select" => nm.select = Some(bytes_to_str(&attr.value)?),
+                        _ => {}
+                    }
+                }
+                if has_body {
+                    self.parse_mapping_body(&mut nm.result_columns, &mut nm.associations, &mut nm.collections)?;
+                }
+                if is_collection {
+                    collections.push(nm);
+                } else {
+                    associations.push(nm);
+                }
+            }
+            _ => {
+                if has_body {
+                    self.skip_element()?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 从 <id>/<result> 标签解析 ResultColumn
+    fn parse_result_column(&self, e: &BytesStart, is_id: bool) -> Result<ResultColumn, MapperError> {
+        let mut column = ResultColumn {
+            is_id,
+            ..Default::default()
+        };
+        for attr in e.attributes() {
+            let attr = attr.map_err(|e| MapperError::ParseError { message: e.to_string() })?;
+            match attr.key.as_ref() {
+                b"property" => column.property = bytes_to_str(&attr.value)?,
+                b"column" => column.column = bytes_to_str(&attr.value)?,
+                b"javaType" => column.java_type = Some(bytes_to_str(&attr.value)?),
+                b"jdbcType" => column.jdbc_type = Some(bytes_to_str(&attr.value)?),
+                b"rustType" => column.rust_type = Some(bytes_to_str(&attr.value)?),
+                _ => {}
+            }
+        }
+        Ok(column)
     }
 
     /// 提取SQL中的参数（支持 #{param} 和 ${param} 两种格式）

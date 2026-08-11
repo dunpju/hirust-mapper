@@ -657,4 +657,224 @@ mod tests {
         assert!(bound.sql.contains("WHERE id = ?"), "bound: {}", bound.sql);
         assert!(bound.sql.contains("AND name = ?"), "bound: {}", bound.sql);
     }
+
+    // ─── P8：ResultMap 增强 + selectKey + .size()/.isEmpty() 测试 ─────
+
+    #[test]
+    fn p8_parse_result_map_with_id_result() {
+        let xml = r#"<mapper namespace="t">
+        <resultMap id="userMap" type="User">
+            <id property="id" column="user_id"/>
+            <result property="name" column="user_name" rustType="String"/>
+        </resultMap>
+        </mapper>"#;
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+        let rm = mapper.result_maps.get("userMap").unwrap();
+        assert_eq!(rm.type_name, "User");
+        assert_eq!(rm.result_columns.len(), 2);
+        assert!(rm.result_columns[0].is_id, "<id> 应标记为 id");
+        assert_eq!(rm.result_columns[0].property, "id");
+        assert_eq!(rm.result_columns[0].column, "user_id");
+        assert!(!rm.result_columns[1].is_id, "<result> 不是 id");
+        assert_eq!(rm.result_columns[1].rust_type.as_deref(), Some("String"));
+        assert!(rm.associations.is_empty());
+        assert!(rm.collections.is_empty());
+    }
+
+    #[test]
+    fn p8_parse_result_map_self_closing() {
+        // 自闭合形式 <id/> <result/>
+        let xml = r#"<mapper namespace="t">
+        <resultMap id="m" type="User">
+            <id property="id" column="id"/>
+            <result property="name" column="name"/>
+        </resultMap>
+        </mapper>"#;
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+        let rm = mapper.result_maps.get("m").unwrap();
+        assert_eq!(rm.result_columns.len(), 2);
+    }
+
+    #[test]
+    fn p8_parse_association_and_collection() {
+        let xml = r#"<mapper namespace="t">
+        <resultMap id="userMap" type="User">
+            <id property="id" column="id"/>
+            <result property="name" column="name"/>
+            <association property="department" javaType="Department">
+                <id property="id" column="dept_id"/>
+                <result property="name" column="dept_name"/>
+            </association>
+            <collection property="roles" ofType="Role">
+                <id property="id" column="role_id"/>
+                <result property="name" column="role_name"/>
+            </collection>
+        </resultMap>
+        </mapper>"#;
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+        let rm = mapper.result_maps.get("userMap").unwrap();
+
+        assert_eq!(rm.associations.len(), 1, "应解析 1 个 association");
+        let assoc = &rm.associations[0];
+        assert_eq!(assoc.property, "department");
+        assert_eq!(assoc.nested_type.as_deref(), Some("Department"));
+        assert_eq!(assoc.result_columns.len(), 2);
+        assert!(assoc.result_columns[0].is_id);
+
+        assert_eq!(rm.collections.len(), 1, "应解析 1 个 collection");
+        let coll = &rm.collections[0];
+        assert_eq!(coll.property, "roles");
+        assert_eq!(coll.nested_type.as_deref(), Some("Role"));
+        assert_eq!(coll.result_columns.len(), 2);
+    }
+
+    #[test]
+    fn p8_parse_nested_association_inside_collection() {
+        // 深层嵌套：collection 内含 association
+        let xml = r#"<mapper namespace="t">
+        <resultMap id="m" type="User">
+            <id property="id" column="id"/>
+            <collection property="orders" ofType="Order">
+                <id property="id" column="order_id"/>
+                <association property="addr" javaType="Addr">
+                    <result property="city" column="city"/>
+                </association>
+            </collection>
+        </resultMap>
+        </mapper>"#;
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+        let rm = mapper.result_maps.get("m").unwrap();
+        let coll = &rm.collections[0];
+        assert_eq!(coll.associations.len(), 1, "collection 内应含 association");
+        assert_eq!(coll.associations[0].property, "addr");
+        assert_eq!(coll.associations[0].result_columns[0].column, "city");
+    }
+
+    #[test]
+    fn p8_parse_select_key() {
+        let xml = r#"<mapper namespace="t">
+        <insert id="insertWithKey">
+            <selectKey keyProperty="id" resultType="i64" order="AFTER">
+                SELECT LAST_INSERT_ID()
+            </selectKey>
+            INSERT INTO users (name) VALUES (#{name})
+        </insert>
+        </mapper>"#;
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+        let stmt = mapper.statements.get("insertWithKey").unwrap();
+        let sk = stmt.select_key.as_ref().expect("应解析 selectKey");
+        assert_eq!(sk.key_property, "id");
+        assert_eq!(sk.result_type, "i64");
+        assert_eq!(sk.order, crate::SelectKeyOrder::After);
+        assert!(sk.sql.contains("LAST_INSERT_ID"), "selectKey SQL: {}", sk.sql);
+        // selectKey 不应混入主 SQL
+        assert!(!stmt.sql.contains("LAST_INSERT_ID"), "主 SQL 不应含 selectKey: {}", stmt.sql);
+        assert!(stmt.sql.contains("INSERT INTO users"), "主 SQL: {}", stmt.sql);
+    }
+
+    #[test]
+    fn p8_parse_select_key_before_order() {
+        let xml = r#"<mapper namespace="t">
+        <insert id="i">
+            <selectKey keyProperty="id" resultType="i64" order="BEFORE">
+                SELECT seq.nextval
+            </selectKey>
+            INSERT INTO t VALUES (#{id})
+        </insert>
+        </mapper>"#;
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+        let sk = mapper.statements.get("i").unwrap().select_key.as_ref().unwrap();
+        assert_eq!(sk.order, crate::SelectKeyOrder::Before);
+    }
+
+    // ─── .size() / .isEmpty() 条件测试 ──────────────────────────────
+
+    fn sql_for(xml: &str, id: &str, params: &HashMap<String, Value>) -> String {
+        let mapper = MyBatisXmlParser::new(xml).parse_mapper().unwrap();
+        mapper.build_sql(id, params).unwrap()
+    }
+
+    #[test]
+    fn p8_condition_size_greater_than_zero() {
+        let xml = r#"<mapper namespace="t">
+        <select id="q">
+            SELECT * FROM t
+            <if test="list != null and list.size() > 0">
+                WHERE id IN (<foreach collection="list" item="x" separator=",">#{x}</foreach>)
+            </if>
+        </select>
+        </mapper>"#;
+
+        // 非空列表 → 条件成立
+        let mut p = HashMap::new();
+        p.insert("list".to_string(), Value::Array(vec![Value::Number(1.into())]));
+        let sql = sql_for(xml, "q", &p);
+        assert!(sql.contains("WHERE id IN"), "非空列表应进入条件: {}", sql);
+
+        // 空列表 → 条件不成立（size() == 0）
+        let mut p = HashMap::new();
+        p.insert("list".to_string(), Value::Array(vec![]));
+        let sql = sql_for(xml, "q", &p);
+        assert!(!sql.contains("WHERE"), "空列表应跳过条件: {}", sql);
+    }
+
+    #[test]
+    fn p8_condition_isempty() {
+        let xml = r#"<mapper namespace="t">
+        <select id="q">
+            SELECT * FROM t
+            <if test="name.isEmpty() == false">WHERE active = 1</if>
+        </select>
+        </mapper>"#;
+
+        // 非空字符串 → isEmpty() == false → true
+        let mut p = HashMap::new();
+        p.insert("name".to_string(), Value::String("hi".into()));
+        let sql = sql_for(xml, "q", &p);
+        assert!(sql.contains("WHERE active = 1"), "非空应进入: {}", sql);
+
+        // 空字符串 → isEmpty() == true → 条件 (== false) 不成立
+        let mut p = HashMap::new();
+        p.insert("name".to_string(), Value::String("".into()));
+        let sql = sql_for(xml, "q", &p);
+        assert!(!sql.contains("WHERE"), "空字符串应跳过: {}", sql);
+    }
+
+    #[test]
+    fn p8_condition_bool_literal_comparison() {
+        let xml = r#"<mapper namespace="t">
+        <select id="q">SELECT 1<if test="flag == true"> WHERE a=1</if></select>
+        </mapper>"#;
+        let mut p = HashMap::new();
+        p.insert("flag".to_string(), Value::Bool(true));
+        assert!(sql_for(xml, "q", &p).contains("WHERE a=1"));
+
+        let mut p = HashMap::new();
+        p.insert("flag".to_string(), Value::Bool(false));
+        assert!(!sql_for(xml, "q", &p).contains("WHERE"));
+    }
+
+    #[test]
+    fn p8_condition_size_with_string() {
+        // 字符串的 .size() → 字符数
+        let xml = r#"<mapper namespace="t">
+        <select id="q">SELECT 1<if test="s.size() >= 3"> WHERE ok=1</if></select>
+        </mapper>"#;
+        let mut p = HashMap::new();
+        p.insert("s".to_string(), Value::String("abc".into())); // size 3
+        assert!(sql_for(xml, "q", &p).contains("WHERE ok=1"));
+
+        let mut p = HashMap::new();
+        p.insert("s".to_string(), Value::String("a".into())); // size 1
+        assert!(!sql_for(xml, "q", &p).contains("WHERE"));
+    }
+
+    #[test]
+    fn p8_condition_size_missing_param_is_zero() {
+        let xml = r#"<mapper namespace="t">
+        <select id="q">SELECT 1<if test="missing.size() > 0"> WHERE x=1</if></select>
+        </mapper>"#;
+        // 缺失参数 .size() → 0，条件不成立
+        assert!(!sql_for(xml, "q", &HashMap::new()).contains("WHERE"));
+    }
 }

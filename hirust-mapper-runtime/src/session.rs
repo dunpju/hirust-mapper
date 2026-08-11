@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use hirust_mapper_core::{BoundSql, Mapper};
+use hirust_mapper_core::{BoundSql, Mapper, ResultMap};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
@@ -139,6 +139,33 @@ impl SqlSession {
         }
     }
 
+    /// 查询语句关联的 ResultMap（若声明了 resultMap 且存在）
+    fn get_result_map(&self, namespace: &str, statement_id: &str) -> Result<Option<ResultMap>> {
+        let mapper = self.get_mapper(namespace)?;
+        match mapper.statements.get(statement_id) {
+            Some(stmt) => {
+                if let Some(rm_id) = &stmt.result_map {
+                    Ok(mapper.result_maps.get(rm_id).cloned())
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Err(hirust_mapper_core::MapperError::StatementNotFound {
+                id: statement_id.to_string(),
+            }
+            .into()),
+        }
+    }
+
+    /// 内部：按事务状态选择执行目标并取回原始行
+    async fn fetch_rows(&mut self, bound: &BoundSql) -> Result<Vec<sqlx::any::AnyRow>> {
+        let executor = &self.executor;
+        match self.transaction.as_mut() {
+            Some(tx) => executor.query_rows(bound, &mut **tx).await,
+            None => executor.query_rows(bound, self.environment.pool()).await,
+        }
+    }
+
     // ─── 查询接口 ──────────────────────────────────────────────────
 
     /// 查询单行（期望 0 或 1 行；多于 1 行报 `TooManyRows` 错误）
@@ -148,11 +175,16 @@ impl SqlSession {
         statement_id: &str,
         params: &HashMap<String, Value>,
     ) -> Result<Option<T>> {
+        let result_map = self.get_result_map(namespace, statement_id)?;
         let bound = self.build_bound_sql(namespace, statement_id, params)?;
-        let executor = &self.executor;
-        match self.transaction.as_mut() {
-            Some(tx) => executor.query_one::<_, T>(&bound, &mut **tx).await,
-            None => executor.query_one::<_, T>(&bound, self.environment.pool()).await,
+        let rows = self.fetch_rows(&bound).await?;
+        match result_map {
+            Some(rm) => crate::handler::result_set::ResultSetHandler::map_row_with_result_map::<T>(rows, &rm),
+            None => match rows.len() {
+                0 => Ok(None),
+                1 => Ok(Some(crate::handler::result_set::ResultSetHandler::map_row(&rows[0])?)),
+                n => Err(MapperRuntimeError::TooManyRows { actual: n }),
+            },
         }
     }
 
@@ -163,11 +195,12 @@ impl SqlSession {
         statement_id: &str,
         params: &HashMap<String, Value>,
     ) -> Result<Vec<T>> {
+        let result_map = self.get_result_map(namespace, statement_id)?;
         let bound = self.build_bound_sql(namespace, statement_id, params)?;
-        let executor = &self.executor;
-        match self.transaction.as_mut() {
-            Some(tx) => executor.query::<_, T>(&bound, &mut **tx).await,
-            None => executor.query::<_, T>(&bound, self.environment.pool()).await,
+        let rows = self.fetch_rows(&bound).await?;
+        match result_map {
+            Some(rm) => crate::handler::result_set::ResultSetHandler::map_rows_with_result_map::<T>(rows, &rm),
+            None => crate::handler::result_set::ResultSetHandler::map_rows::<T>(rows),
         }
     }
 

@@ -17,14 +17,14 @@
 | P5 TypeHandler + 参数绑定 | ✅ 已完成 | 2026-08-11 | runtime 34/34 测试通过（含 17 个 P5 新测试） |
 | P6 Executor + SqlSession | ✅ 已完成 | 2026-08-11 | runtime 34 + e2e 10 测试通过（完整 ORM 可用） |
 | P7 热重载 | ✅ 已完成 | 2026-08-11 | runtime 39 + hot_reload 3 测试通过（修改 XML 后查询自动更新） |
-| P8 ResultMap 增强 | ⬜ 待实施 | — | — |
+| P8 ResultMap 增强 | ✅ 已完成 | 2026-08-11 | core 41 + nested_mapping 3 测试通过（association/collection/selectKey/size） |
 | P9 Proc Macros | ⬜ 待实施 | — | — |
 | P10 门面 + 文档 + 示例 | ⬜ 待实施 | — | — |
 
 **当前可在全新电脑上运行的验证命令：**
 
 ```bash
-cargo test --workspace     # 应输出 core 30 + runtime 39 + crud 10 + hot_reload 3 = 82 个测试通过
+cargo test --workspace     # 应输出 core 41 + runtime 39 + crud 10 + hot_reload 3 + nested 3 = 96 个测试通过
 ```
 
 ---
@@ -35,7 +35,7 @@ cargo test --workspace     # 应输出 core 30 + runtime 39 + crud 10 + hot_relo
    ```bash
    git clone <repo-url> hirust-mapper
    cd hirust-mapper
-   cargo test --workspace          # 确认 82 个测试全通过
+   cargo test --workspace          # 确认 96 个测试全通过
    ```
 
 2. **识别下一个待实施阶段**：查看上方"执行状态"表格，找到第一个 `⬜ 待实施` 的阶段。
@@ -171,13 +171,13 @@ handler = "myapp::handlers::MyEnumHandler"
 
 ---
 
-## 3. 扩展的 XML Mapper 格式（P8 待实施）
+## 3. 扩展的 XML Mapper 格式（✅ P8 已实现）
 
 在现有格式基础上新增（向后兼容）：
 
 ```xml
 <mapper namespace="myapp::dao::UserDao">
-    <!-- P8 新增: resultMap 支持 id/association/collection -->
+    <!-- P8: resultMap 支持 id/association/collection（含深层嵌套） -->
     <resultMap id="userResultMap" type="User">
         <id property="id" column="id"/>
         <result property="name" column="user_name" rustType="String"/>
@@ -190,15 +190,26 @@ handler = "myapp::handlers::MyEnumHandler"
         </collection>
     </resultMap>
 
-    <!-- P8 新增: selectKey -->
+    <!-- P8: selectKey（主键回填，Before/After） -->
     <insert id="insertWithKey">
         <selectKey keyProperty="id" resultType="i64" order="AFTER">
             SELECT LAST_INSERT_ID()
         </selectKey>
         INSERT INTO users (name) VALUES (#{name})
     </insert>
+
+    <!-- P8: 条件支持 .size() / .isEmpty() -->
+    <select id="findByIds" resultMap="userResultMap">
+        SELECT * FROM users
+        <if test="ids != null and ids.size() > 0">
+            WHERE id IN (<foreach collection="ids" item="x" separator=",">#{x}</foreach>)
+        </if>
+    </select>
 </mapper>
 ```
+
+> **嵌套映射运行时**：`SqlSession.select_*` 自动按 statement 的 `resultMap` 走嵌套映射——
+> association 从扁平 join 行构建嵌套对象（列为空→null），collection 按父 `<id>` 分组累加子项。
 
 ---
 
@@ -475,12 +486,13 @@ P6 已补充 `Database(#[from] sqlx::Error)` 变体（见上表注释，当前�
 - [x] 优雅关闭（Drop：watcher 断开事件通道 → worker 退出 → join）
 - **验证**：runtime 39 + hot_reload 3 测试通过（修改 XML 文件后查询结果自动变化）
 
-### ⬜ P8: ResultMap 增强
-- [ ] model.rs: ResultMap 支持 association/collection 嵌套
-- [ ] parser.rs: 解析 `<id>`/`<association>`/`<collection>`/`<selectKey>` 标签
-- [ ] sql_generator.rs: 条件表达式支持 `.size()`/`.isEmpty()`
-- [ ] ResultSetHandler: 嵌套对象映射
-- **验证**：复杂 resultMap 映射测试
+### ✅ P8: ResultMap 增强
+- [x] model.rs: `ResultColumn`（is_id/rust_type）+ `ResultMap`（associations/collections）+ `NestedMapping` + `SelectKey`/`SelectKeyOrder` + `SqlStatement.select_key`
+- [x] parser.rs: 解析 `<id>`/`<association>`/`<collection>`（递归 + 自闭合）+ `<selectKey>`
+- [x] sql_generator.rs: 条件表达式支持 `.size()`/`.isEmpty()` + 布尔字面量比较（true/false）+ f64 比较
+- [x] ResultSetHandler: 嵌套对象映射（association 一对一 + collection 一对多按 id 分组）
+- [x] SqlSession: select_one/select_list 按 statement 的 resultMap 自动走嵌套映射
+- **验证**：core 41（含 11 个 P8 解析/条件测试）+ nested_mapping 3（association/collection/select_one e2e）
 
 ### ⬜ P9: Proc Macros
 - [ ] `hirust-mapper-macros/src/derive_model.rs`: #[derive(MapperModel)]
@@ -496,7 +508,7 @@ P6 已补充 `Database(#[from] sqlx::Error)` 变体（见上表注释，当前�
 - [ ] examples/proc_macro_usage.rs
 - **验证**：示例可独立编译运行
 
-**总计剩余约 6-11 个工作日（P8-P10）。**
+**总计剩余约 5-8 个工作日（P9-P10）。**
 
 ---
 
@@ -527,6 +539,7 @@ P6 已补充 `Database(#[from] sqlx::Error)` 变体（见上表注释，当前�
 | 模块 | 路径 | 功能 |
 |------|------|------|
 | `MyBatisXmlParser` | `hirust-mapper-core/src/parser.rs` | XML 解析（10 种动态标签） |
+| `ResultMap` / `NestedMapping` / `SelectKey` | `hirust-mapper-core/src/model.rs` | 结果映射 + 嵌套 + 主键回填 (P8) |
 | `DynamicSqlNode` | `hirust-mapper-core/src/model.rs` | 动态 SQL AST（10 变体） |
 | `generate_sql` / `build_sql` | `hirust-mapper-core/src/sql_generator.rs` | SQL 生成 |
 | `ParamsAccess` | `hirust-mapper-core/src/sql_generator.rs` | 参数访问 trait |

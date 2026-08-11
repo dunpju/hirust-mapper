@@ -109,14 +109,52 @@ impl ConditionGroup {
     }
 }
 
+/// 解析参数键的值，支持 `.size()` / `.isEmpty()` 方法调用
+///
+/// - `key.size()` → 集合/字符串/对象的长度（Number）；缺失或 null → 0
+/// - `key.isEmpty()` → 是否为空（Bool）；缺失或 null → true
+/// - 其他 → 原始参数值
+fn resolve_param(key: &str, params: &impl ParamsAccess) -> Option<Value> {
+    if let Some(base) = key.strip_suffix(".size()") {
+        match params.get_param(base) {
+            Some(Value::Array(a)) => Some(Value::Number(a.len().into())),
+            Some(Value::String(s)) => Some(Value::Number(s.chars().count().into())),
+            Some(Value::Object(o)) => Some(Value::Number(o.len().into())),
+            Some(Value::Null) | None => Some(Value::Number(0.into())),
+            Some(other) => Some(other.clone()),
+        }
+    } else if let Some(base) = key.strip_suffix(".isEmpty()") {
+        match params.get_param(base) {
+            Some(Value::Array(a)) => Some(Value::Bool(a.is_empty())),
+            Some(Value::String(s)) => Some(Value::Bool(s.is_empty())),
+            Some(Value::Object(o)) => Some(Value::Bool(o.is_empty())),
+            Some(Value::Null) | None => Some(Value::Bool(true)),
+            Some(_) => Some(Value::Bool(false)),
+        }
+    } else {
+        params.get_param(key).cloned()
+    }
+}
+
 /// 评估单个比较条件
 fn evaluate_single(kv: &KeyValue, params: &impl ParamsAccess) -> bool {
-    match params.get_param(&kv.key) {
+    match resolve_param(&kv.key, params) {
         Some(value) => {
+            // 布尔字面量判定辅助
+            let value_bool = if kv.value.eq_ignore_ascii_case("true") {
+                Some(true)
+            } else if kv.value.eq_ignore_ascii_case("false") {
+                Some(false)
+            } else {
+                None
+            };
+
             match kv.condition.as_str() {
                 "=" | "==" => {
                     if kv.value == "null" {
                         return false;
+                    } else if let Some(b) = value_bool {
+                        matches!(value, Value::Bool(x) if x == b)
                     } else if kv.value.starts_with('\'') && kv.value.ends_with('\'') {
                         let str_val = kv.value.trim_matches('\'');
                         matches!(value, Value::String(s) if s == str_val)
@@ -129,6 +167,8 @@ fn evaluate_single(kv: &KeyValue, params: &impl ParamsAccess) -> bool {
                 "!=" => {
                     if kv.value == "null" {
                         return true;
+                    } else if let Some(b) = value_bool {
+                        matches!(value, Value::Bool(x) if x != b)
                     } else if kv.value.starts_with('\'') && kv.value.ends_with('\'') {
                         let str_val = kv.value.trim_matches('\'');
                         matches!(value, Value::String(s) if s != str_val)
@@ -139,8 +179,11 @@ fn evaluate_single(kv: &KeyValue, params: &impl ParamsAccess) -> bool {
                     }
                 },
                 op @ (">" | "<" | ">=" | "<=") => {
-                    if let Ok(num) = kv.value.parse::<i64>() {
-                        if let Some(n) = value.as_i64() {
+                    // 支持 i64 / f64 数值比较
+                    let target = kv.value.parse::<f64>().ok();
+                    if let Some(num) = target {
+                        let cur = value.as_f64();
+                        if let Some(n) = cur {
                             return match op {
                                 ">" => n > num,
                                 "<" => n < num,

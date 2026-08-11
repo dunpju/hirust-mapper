@@ -96,6 +96,31 @@ pub struct SqlStatement {
     pub dynamic_sql: Option<DynamicSqlNode>,
     /// 参数列表
     pub parameters: Vec<String>,
+    /// selectKey（主键回填，仅 INSERT/UPDATE）
+    pub select_key: Option<SelectKey>,
+}
+
+/// selectKey 的执行时机
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum SelectKeyOrder {
+    /// 在主 SQL 之前执行
+    Before,
+    /// 在主 SQL 之后执行（默认）
+    #[default]
+    After,
+}
+
+/// selectKey 配置（生成主键回填）
+#[derive(Debug, Default, Clone)]
+pub struct SelectKey {
+    /// 主键属性名（参数对象上的字段）
+    pub key_property: String,
+    /// 主键类型
+    pub result_type: String,
+    /// 执行时机
+    pub order: SelectKeyOrder,
+    /// 取主键的 SQL
+    pub sql: String,
 }
 
 /// 结果映射模型
@@ -105,8 +130,12 @@ pub struct ResultMap {
     pub id: String,
     /// 类型
     pub type_name: String,
-    /// 结果列映射
+    /// 结果列映射（含 <id> 与 <result>）
     pub result_columns: Vec<ResultColumn>,
+    /// 一对一嵌套关联（<association>）
+    pub associations: Vec<NestedMapping>,
+    /// 一对多嵌套集合（<collection>）
+    pub collections: Vec<NestedMapping>,
 }
 
 /// 结果列映射
@@ -116,10 +145,33 @@ pub struct ResultColumn {
     pub property: String,
     /// 列名
     pub column: String,
-    /// Java类型
+    /// Java 类型
     pub java_type: Option<String>,
-    /// JDBC类型
+    /// JDBC 类型
     pub jdbc_type: Option<String>,
+    /// Rust 类型（rustType 属性）
+    pub rust_type: Option<String>,
+    /// 是否为 <id>（标记身份，用于 collection 分组）
+    pub is_id: bool,
+}
+
+/// 嵌套映射（<association> / <collection> 共用）
+#[derive(Debug, Default, Clone)]
+pub struct NestedMapping {
+    /// 属性名
+    pub property: String,
+    /// 外键列（用于关联判空 / 分组）
+    pub column: Option<String>,
+    /// association: javaType；collection: ofType
+    pub nested_type: Option<String>,
+    /// 嵌套查询 ID（select 属性，延迟加载；本实现暂不支持）
+    pub select: Option<String>,
+    /// 嵌套结果列（含 <id> 与 <result>）
+    pub result_columns: Vec<ResultColumn>,
+    /// 更深层嵌套关联
+    pub associations: Vec<NestedMapping>,
+    /// 更深层嵌套集合
+    pub collections: Vec<NestedMapping>,
 }
 
 /// 动态SQL节点

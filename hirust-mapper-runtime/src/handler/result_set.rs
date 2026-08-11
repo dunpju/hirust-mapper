@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use hirust_mapper_core::{NestedMapping, ResultMap};
 use serde::de::DeserializeOwned;
 use serde_json::{Number, Value};
 use sqlx::any::{AnyRow, AnyTypeInfoKind};
@@ -150,6 +151,146 @@ impl ResultSetHandler {
     /// 获取类型处理器注册表引用
     pub fn type_handlers(&self) -> &TypeHandlerRegistry {
         &self.type_handlers
+    }
+
+    // ─── ResultMap 嵌套映射（P8）──────────────────────────────────
+
+    /// 按列名读取单格值（列不存在返回 Null）
+    fn column_value_by_name(row: &AnyRow, name: &str) -> Result<Value> {
+        for (idx, col) in row.columns().iter().enumerate() {
+            if col.name() == name {
+                return Self::column_to_value(row, idx, None);
+            }
+        }
+        Ok(Value::Null)
+    }
+
+    /// 构建嵌套对象（association / collection 子项共用）。
+    /// 若所有结果列为 null，返回 `Value::Null`（表示无关联对象）。
+    fn build_nested_object(row: &AnyRow, mapping: &NestedMapping) -> Result<Value> {
+        let mut obj = serde_json::Map::new();
+        let mut any_non_null = false;
+        for col in &mapping.result_columns {
+            let v = Self::column_value_by_name(row, &col.column)?;
+            if !v.is_null() {
+                any_non_null = true;
+            }
+            obj.insert(col.property.clone(), v);
+        }
+        if any_non_null {
+            Ok(Value::Object(obj))
+        } else {
+            Ok(Value::Null)
+        }
+    }
+
+    /// 构建单个父对象（含顶层列 + association + collection 首元素）
+    fn build_parent_object(row: &AnyRow, result_map: &ResultMap) -> Result<Value> {
+        let mut obj = serde_json::Map::new();
+
+        // 顶层 id/result 列
+        for col in &result_map.result_columns {
+            let v = Self::column_value_by_name(row, &col.column)?;
+            obj.insert(col.property.clone(), v);
+        }
+
+        // association（一对一）：列为空则 Null
+        for assoc in &result_map.associations {
+            let nested = Self::build_nested_object(row, assoc)?;
+            obj.insert(assoc.property.clone(), nested);
+        }
+
+        // collection（一对多）：首行放入数组，后续行追加
+        for coll in &result_map.collections {
+            let child = Self::build_nested_object(row, coll)?;
+            if child.is_null() {
+                obj.insert(coll.property.clone(), Value::Array(Vec::new()));
+            } else {
+                obj.insert(coll.property.clone(), Value::Array(vec![child]));
+            }
+        }
+
+        Ok(Value::Object(obj))
+    }
+
+    /// 父对象的分组键（由 id 列的值拼接；无 id 列时使用行序号）
+    fn parent_key(row: &AnyRow, id_cols: &[String], row_idx: usize) -> Result<String> {
+        if id_cols.is_empty() {
+            return Ok(format!("__row_{}", row_idx));
+        }
+        let mut parts = Vec::with_capacity(id_cols.len());
+        for c in id_cols {
+            let v = Self::column_value_by_name(row, c)?;
+            parts.push(v.to_string());
+        }
+        Ok(parts.join("\u{1F}")) // 单元分隔符，避免值内逗号冲突
+    }
+
+    /// 使用 ResultMap 将多行映射为 `Vec<T>`（支持 association 一对一 + collection 一对多分组）
+    ///
+    /// - `<id>` 列决定父对象分组：相同 id 的行合并，collection 追加子项
+    /// - association：从扁平 join 行的列构建嵌套对象（列为空 → null）
+    /// - collection：按父 id 分组，每行贡献一个子项
+    pub fn map_rows_with_result_map<T: DeserializeOwned>(
+        rows: Vec<AnyRow>,
+        result_map: &ResultMap,
+    ) -> Result<Vec<T>> {
+        let id_cols: Vec<String> = result_map
+            .result_columns
+            .iter()
+            .filter(|c| c.is_id)
+            .map(|c| c.column.clone())
+            .collect();
+
+        let mut parents: Vec<Value> = Vec::new();
+        let mut key_index: HashMap<String, usize> = HashMap::new();
+
+        for (row_idx, row) in rows.iter().enumerate() {
+            let key = Self::parent_key(row, &id_cols, row_idx)?;
+            if let Some(&idx) = key_index.get(&key) {
+                // 已存在父：仅追加 collection 子项
+                for coll in &result_map.collections {
+                    let child = Self::build_nested_object(row, coll)?;
+                    if child.is_null() {
+                        continue;
+                    }
+                    if let Some(arr) = parents[idx]
+                        .as_object_mut()
+                        .and_then(|o| o.get_mut(&coll.property))
+                        .and_then(|v| v.as_array_mut())
+                    {
+                        arr.push(child);
+                    }
+                }
+            } else {
+                key_index.insert(key, parents.len());
+                parents.push(Self::build_parent_object(row, result_map)?);
+            }
+        }
+
+        parents
+            .into_iter()
+            .map(|v| {
+                serde_json::from_value::<T>(v).map_err(|e| {
+                    MapperRuntimeError::TypeConversion(format!("ResultMap 反序列化失败: {}", e))
+                })
+            })
+            .collect()
+    }
+
+    /// 使用 ResultMap 映射单行（`select_one` 路径；多于一行报错）
+    pub fn map_row_with_result_map<T: DeserializeOwned>(
+        rows: Vec<AnyRow>,
+        result_map: &ResultMap,
+    ) -> Result<Option<T>> {
+        match rows.len() {
+            0 => Ok(None),
+            1 => {
+                let mut mapped = Self::map_rows_with_result_map::<T>(rows, result_map)?;
+                Ok(mapped.pop())
+            }
+            n => Err(MapperRuntimeError::TooManyRows { actual: n }),
+        }
     }
 }
 
