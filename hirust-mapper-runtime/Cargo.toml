@@ -12,10 +12,12 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 glob = { workspace = true }
 toml = { workspace = true }
+sqlx = { workspace = true, features = ["runtime-tokio", "any"] }
+tokio = { workspace = true }
 
 [features]
-default = []
-# 数据库后端 feature gates（后续阶段启用）
-# mysql = ["sqlx/mysql"]
-# postgres = ["sqlx/postgres"]
-# sqlite = ["sqlx/sqlite"]
+default = ["sqlite"]
+# 数据库后端 feature gates
+mysql = ["sqlx/mysql"]
+postgres = ["sqlx/postgres"]
+sqlite = ["sqlx/sqlite"]

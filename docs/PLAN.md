@@ -12,7 +12,7 @@
 |------|------|----------|----------|
 | P1 Workspace 重构 | ✅ 已完成 | 2026-08-10 | core 15/15 测试通过 |
 | P2 配置系统 | ✅ 已完成 | 2026-08-10 | runtime 9/9 测试通过 |
-| P3 Registry + Environment | ⬜ 待实施 | — | — |
+| P3 Registry + Environment | ✅ 已完成 | 2026-08-11 | runtime 17/17 测试通过（含 8 个新测试） |
 | P4 BoundSql 两阶段重构 | ⬜ 待实施 | — | — |
 | P5 TypeHandler + 参数绑定 | ⬜ 待实施 | — | — |
 | P6 Executor + SqlSession | ⬜ 待实施 | — | — |
@@ -24,7 +24,7 @@
 **当前可在全新电脑上运行的验证命令：**
 
 ```bash
-cargo test --workspace     # 应输出 core 15 + runtime 9 = 24 个测试通过
+cargo test --workspace     # 应输出 core 15 + runtime 17 = 32 个测试通过
 ```
 
 ---
@@ -35,7 +35,7 @@ cargo test --workspace     # 应输出 core 15 + runtime 9 = 24 个测试通过
    ```bash
    git clone <repo-url> hirust-mapper
    cd hirust-mapper
-   cargo test --workspace          # 确认 24 个测试全通过
+   cargo test --workspace          # 确认 32 个测试全通过
    ```
 
 2. **识别下一个待实施阶段**：查看上方"执行状态"表格，找到第一个 `⬜ 待实施` 的阶段。
@@ -73,8 +73,8 @@ hirust-mapper/
 │       ├── config.rs                 # ✅ HirustMapperConfig (TOML 解析)
 │       ├── error.rs                  # ✅ MapperRuntimeError
 │       ├── registry.rs               # ✅ MapperRegistry + TypeAliasRegistry
-│       ├── environment.rs            # ⬜ sqlx::Pool 包装 (P3)
-│       ├── session_factory.rs        # ⬜ SqlSessionFactory (P3)
+│       ├── environment.rs            # ✅ Environment + EnvironmentRegistry (P3)
+│       ├── session_factory.rs        # ✅ SqlSessionFactory + SqlSession (P3)
 │       ├── session.rs                # ⬜ SqlSession (P6)
 │       ├── executor/                 # ⬜ (P6)
 │       │   ├── simple.rs
@@ -119,8 +119,8 @@ hirust-mapper (facade) → 依赖 → core + runtime(可选) + macros(可选)
 | thiserror | 2 | 错误类型派生 | ✅ 已用 (runtime) |
 | glob | 0.3 | mapper 文件发现 | ✅ 已用 (runtime) |
 | toml | 0.8 | 配置文件解析 | ✅ 已用 (runtime) |
-| sqlx | 0.8 | 数据库执行层 | ⬜ P3 引入 |
-| tokio | 1 | async runtime | ⬜ P3 引入 |
+| sqlx | 0.8 | 数据库执行层 | ✅ P3 已引入 |
+| tokio | 1 | async runtime | ✅ P3 已引入 |
 | notify | 7 | 文件变更监控/热重载 | ⬜ P7 引入 |
 | chrono/uuid | 0.4/1 | 可选类型处理器 | ⬜ P5 引入 |
 
@@ -295,12 +295,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-> **注意**：P2 已实现配置加载，P3-P6 完成后上述完整流程才可用。当前（P2 完成后）可用的流程是：
+> **注意**：P3 已实现 Environment + SessionFactory。P4-P6 完成后上述完整 CRUD 流程才可用。当前（P3 完成后）可用的流程是：
 > ```rust
-> let config = HirustMapperConfig::parse_toml(toml_str)?;
-> let registry = MapperRegistry::new();
-> registry.load_from_config(&config, &base_dir)?;
-> let sql = registry.get_mapper("ns")?.build_sql("id", &params)?;
+> let config = HirustMapperConfig::load_file("hirust-mapper.toml")?;
+> let factory = SqlSessionFactory::build(config, ".").await?;
+> let session = factory.open_session();
+> let mapper = session.get_mapper("myapp::dao::UserDao")?;
+> let sql = mapper.build_sql("findById", &params)?;
+> // sql 查询和结果映射需 P4-P6 支持
+> factory.close().await;
 > ```
 
 ---
@@ -398,14 +401,15 @@ P6 实施时需补充 `Database(#[from] sqlx::Error)` 变体。
 - [x] `TypeAliasRegistry` 别名解析
 - **验证**：`cargo test -p hirust-mapper-runtime` → 9 测试通过
 
-### ⬜ P3: Registry + Environment + SessionFactory
-- [ ] 引入 sqlx 依赖（feature-gated: mysql/postgres/sqlite）
-- [ ] `environment.rs`: `Environment` 包装 sqlx::Pool
-- [ ] `session_factory.rs`: `SqlSessionFactory::build(config)` + `open_session()`
-- [ ] SqlSessionFactory 持有 `Arc<RwLock<MapperRegistry>>` + `Environment`
-- [ ] build() 内调用 `registry.load_from_config()`
+### ✅ P3: Registry + Environment + SessionFactory
+- [x] 引入 sqlx 依赖（feature-gated: mysql/postgres/sqlite）
+- [x] `environment.rs`: `Environment` 包装 sqlx::AnyPool + `EnvironmentRegistry`
+- [x] `session_factory.rs`: `SqlSessionFactory::build(config)` + `open_session()` + `SqlSession`
+- [x] SqlSessionFactory 持有 `Arc<RwLock<MapperRegistry>>` + `Environment`
+- [x] build() 内调用 `registry.load_from_config()` + `install_default_drivers()`
+- [x] feature gates: `mysql`, `postgres`, `sqlite` (default: sqlite)
 - **里程碑**：能从 TOML 配置启动，加载所有 mapper，创建 SessionFactory
-- **验证**：集成测试用 SQLite 内存库验证连接池创建
+- **验证**：runtime 17/17 测试通过（含 8 个 P3 新测试）
 
 ### ⬜ P4: BoundSql 两阶段重构
 - [ ] 新增 `bound_sql.rs`: `BoundSql { sql, params }` 结构
@@ -460,7 +464,7 @@ P6 实施时需补充 `Database(#[from] sqlx::Error)` 变体。
 - [ ] examples/proc_macro_usage.rs
 - **验证**：示例可独立编译运行
 
-**总计剩余约 18-26 个工作日（P3-P10）。**
+**总计剩余约 15-23 个工作日（P4-P10）。**
 
 ---
 
@@ -499,3 +503,7 @@ P6 实施时需补充 `Database(#[from] sqlx::Error)` 变体。
 | `MapperRegistry` | `hirust-mapper-runtime/src/registry.rs` | 线程安全 Mapper 注册表 |
 | `TypeAliasRegistry` | `hirust-mapper-runtime/src/registry.rs` | 类型别名解析 |
 | `MapperRuntimeError` | `hirust-mapper-runtime/src/error.rs` | 运行时错误（10 变体） |
+| `Environment` | `hirust-mapper-runtime/src/environment.rs` | 数据库连接池封装 (P3) |
+| `EnvironmentRegistry` | `hirust-mapper-runtime/src/environment.rs` | 多数据库环境管理 (P3) |
+| `SqlSessionFactory` | `hirust-mapper-runtime/src/session_factory.rs` | 应用级 Session 工厂 (P3) |
+| `SqlSession` | `hirust-mapper-runtime/src/session_factory.rs` | 请求级轻量 Session (P3) |
