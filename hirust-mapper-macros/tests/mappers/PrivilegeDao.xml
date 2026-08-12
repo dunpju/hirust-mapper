@@ -1,0 +1,12 @@
+<mapper namespace="test.privilege">
+    <select id="find_by_id">SELECT id, name, status FROM users WHERE id = #{id}</select>
+    <select id="list_by_status">SELECT id, name, status FROM users WHERE status = #{status} ORDER BY id</select>
+    <insert id="create">INSERT INTO users (name, status) VALUES (#{name}, #{status})</insert>
+    <update id="set_status">UPDATE users SET status = #{status} WHERE id = #{id}</update>
+    <delete id="remove_by_id">DELETE FROM users WHERE id = #{id}</delete>
+    <select id="get_by_privilege_project_ids">
+        SELECT id, name, status FROM users WHERE id IN
+        <foreach collection="project_ids" item="pid" open="(" separator="," close=")">#{pid}</foreach>
+        ORDER BY id
+    </select>
+</mapper>

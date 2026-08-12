@@ -14,7 +14,7 @@
 - **ResultMap 嵌套映射** — `<association>` 一对一、`<collection>` 一对多分组、`<id>` 身份、`<selectKey>` 主键回填
 - **条件增强** — 支持 `.size()` / `.isEmpty()` 方法调用与布尔字面量
 - **热重载** — `notify` 监控 XML 变更，去抖后原子替换（开发期零重启）
-- **编译时类型安全** — `#[hirust_mapper(xml)]` 编译时校验 XML 并生成 DAO 方法
+- **编译时类型安全** — `#[hirust_mapper(xml)]` 编译时校验 XML 并生成 DAO 方法；`#[dao]`+`#[mapper_query]` 按方法签名生成类型化 DAO
 - **多数据库** — mysql / postgres / sqlite（feature gates，默认 sqlite）
 
 ## 快速开始
@@ -127,6 +127,58 @@ let users: Vec<User> = dao.findById(&params).await?;
 ```
 
 XML 文件缺失、解析失败、非法语句 id 等均在**编译期**报错。
+
+### 类型化 DAO（`#[dao]` + `#[mapper_query]`，推荐）
+
+`#[hirust_mapper(xml)]` 生成的方法参数是 `HashMap`、返回靠 turbofish 推断。`#[dao]` 进一步
+**按 Rust 方法签名**生成方法体——参数名即 SQL 参数键、方法名即 statement_id、返回类型自动分派，
+最大程度消除样板：
+
+```rust
+use hirust_mapper::{dao, Result};   // mapper_query 是 #[dao] 消费的标记，无需 import
+
+#[dao]                               // struct 侧：自动加 factory 字段 + new()
+struct UserDao;
+
+#[dao(namespace = "app.dao.user", xml = "mappers/UserDao.xml")]
+impl UserDao {
+    #[mapper_query]                  // Result<Option<T>> → select_one；方法名→"find_by_id"
+    async fn find_by_id(&self, id: i64) -> Result<Option<User>> {}
+
+    #[mapper_query]                  // Result<Vec<T>> → select_list
+    async fn list_by_status(&self, status: String) -> Result<Vec<User>> {}
+
+    #[mapper_query(kind = "insert")] // 写操作须显式 kind；形参 name/age → #{name}/#{age}
+    async fn create(&self, name: String, age: i64) -> Result<i64> {}
+
+    #[mapper_query(kind = "update", id = "setAge")]  // id= 覆盖 statement_id
+    async fn set_age(&self, id: i64, age: i64) -> Result<u64> {}
+
+    #[mapper_query]                  // Vec<i64> 形参 ↔ foreach collection="project_ids"
+    async fn get_by_privilege_project_ids(&self, project_ids: Vec<i64>) -> Result<Vec<User>> {}
+}
+
+let dao = UserDao::new(factory);
+let u: Option<User> = dao.find_by_id(42).await?;
+```
+
+**改造前（手写样板）→ 改造后（`#[dao]`）：**
+
+```rust
+// 改造前：每个方法手写 namespace / statement_id / HashMap
+const NS: &str = "app.dao.user";
+async fn find_by_id(dao: &UserDao, id: i64) -> Result<Option<User>> {
+    let mut p = HashMap::new();
+    p.insert("id".into(), json!(id));                 // 易拼错、无类型提示
+    let mut s = dao.factory().open_session();
+    s.select_one(NS, "find_by_id", &p).await
+}
+// 改造后：见上方 #[mapper_query] —— 零样板，全类型化。
+```
+
+返回类型分派规则：`Result<Vec<T>>`→select_list、`Result<Option<T>>`→select_one、`Result<i64>`+`kind=insert`→生成主键、
+`Result<u64>`+`kind=update/delete`→受影响行数、`Result<()>`→执行后丢弃。namespace 默认 `module_path!()`
+（可用 `namespace=` 显式覆盖）；`xml=` 启用编译期 statement_id 存在性校验。与 `#[hirust_mapper(xml)]` 并存，可逐 DAO 迁移。
 
 ## Mapper XML 格式
 
@@ -312,7 +364,7 @@ cargo run --example proc_macro_usage --features full       # 编译时 DAO 生�
 |-------|------|
 | `hirust-mapper-core` | XML 解析 + 动态 SQL 生成 + BoundSql（无 async 依赖） |
 | `hirust-mapper-runtime` | 配置 / Session / Executor / TypeHandler / 热重载 / ResultMap 映射 |
-| `hirust-mapper-macros` | `#[hirust_mapper]` / `#[derive(MapperModel)]` 编译时层 |
+| `hirust-mapper-macros` | `#[hirust_mapper]` / `#[dao]` / `#[derive(MapperModel)]` 编译时层 |
 | `hirust-mapper` | 门面 crate，feature gate 聚合 |
 
 依赖：[sqlx](https://crates.io/crates/sqlx) 0.9（执行层）、[quick-xml](https://crates.io/crates/quick-xml) 0.41（解析）、[notify](https://crates.io/crates/notify) 8（热重载）、[futures-util](https://crates.io/crates/futures-util) 0.3（流式查询）、[tokio](https://crates.io/crates/tokio) 1（异步运行时）。
