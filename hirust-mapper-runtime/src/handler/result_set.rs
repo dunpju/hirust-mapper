@@ -436,7 +436,7 @@ mod tests {
         };
 
         let args = ParameterHandler::bind_arguments(&bound).unwrap();
-        let row: AnyRow = sqlx::query_with(&bound.sql, args)
+        let row: AnyRow = sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
             .fetch_one(&pool)
             .await
             .unwrap();

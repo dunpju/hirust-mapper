@@ -57,7 +57,7 @@ impl TypeHandler for I64Handler {
         Ok(v.map(|x| Value::Number(x.into())).unwrap_or(Value::Null))
     }
 
-    fn set_parameter(&self, value: &Value, arguments: &mut AnyArguments<'_>) -> Result<()> {
+    fn set_parameter(&self, value: &Value, arguments: &mut AnyArguments) -> Result<()> {
         match value {
             Value::Number(n) => {
                 if let Some(i) = n.as_i64() {
@@ -99,7 +99,7 @@ impl TypeHandler for I32Handler {
         Ok(v.map(|x| Value::Number(x.into())).unwrap_or(Value::Null))
     }
 
-    fn set_parameter(&self, value: &Value, arguments: &mut AnyArguments<'_>) -> Result<()> {
+    fn set_parameter(&self, value: &Value, arguments: &mut AnyArguments) -> Result<()> {
         match value {
             Value::Number(n) => {
                 if let Some(i) = n.as_i64() {
@@ -153,7 +153,7 @@ impl TypeHandler for F64Handler {
             .unwrap_or(Value::Null))
     }
 
-    fn set_parameter(&self, value: &Value, arguments: &mut AnyArguments<'_>) -> Result<()> {
+    fn set_parameter(&self, value: &Value, arguments: &mut AnyArguments) -> Result<()> {
         match value {
             Value::Number(n) => {
                 let f = n.as_f64().unwrap_or(0.0);
@@ -189,7 +189,7 @@ impl TypeHandler for BoolHandler {
         Ok(v.map(Value::Bool).unwrap_or(Value::Null))
     }
 
-    fn set_parameter(&self, value: &Value, arguments: &mut AnyArguments<'_>) -> Result<()> {
+    fn set_parameter(&self, value: &Value, arguments: &mut AnyArguments) -> Result<()> {
         match value {
             Value::Bool(b) => {
                 check_add(arguments.add(*b), "bool")?;
@@ -224,7 +224,7 @@ impl TypeHandler for StringHandler {
         Ok(v.map(Value::String).unwrap_or(Value::Null))
     }
 
-    fn set_parameter(&self, value: &Value, arguments: &mut AnyArguments<'_>) -> Result<()> {
+    fn set_parameter(&self, value: &Value, arguments: &mut AnyArguments) -> Result<()> {
         match value {
             Value::String(s) => {
                 check_add(arguments.add(s.clone()), "string")?;
@@ -271,7 +271,7 @@ mod chrono_handler {
             }
         }
 
-        fn set_parameter(&self, value: &Value, arguments: &mut AnyArguments<'_>) -> Result<()> {
+        fn set_parameter(&self, value: &Value, arguments: &mut AnyArguments) -> Result<()> {
             match value {
                 Value::String(s) => {
                     // 验证可解析
@@ -326,7 +326,7 @@ mod uuid_handler {
             }
         }
 
-        fn set_parameter(&self, value: &Value, arguments: &mut AnyArguments<'_>) -> Result<()> {
+        fn set_parameter(&self, value: &Value, arguments: &mut AnyArguments) -> Result<()> {
             match value {
                 Value::String(s) => {
                     let u: uuid::Uuid = s.parse().map_err(|e| {

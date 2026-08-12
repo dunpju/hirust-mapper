@@ -45,7 +45,7 @@ impl SimpleExecutor {
         E: Executor<'q, Database = sqlx::Any>,
     {
         let args = ParameterHandler::bind_arguments(bound)?;
-        sqlx::query_with(&bound.sql, args)
+        sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
             .fetch_all(executor)
             .await
             .map_err(Into::into)
@@ -86,7 +86,7 @@ impl SimpleExecutor {
         E: Executor<'q, Database = sqlx::Any>,
     {
         let args = ParameterHandler::bind_arguments(bound)?;
-        sqlx::query_with(&bound.sql, args)
+        sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
             .execute(executor)
             .await
             .map_err(Into::into)
@@ -99,7 +99,7 @@ where
     E: Executor<'q, Database = sqlx::Any>,
 {
     let args = ParameterHandler::bind_arguments(bound)?;
-    let result = sqlx::query_with(&bound.sql, args)
+    let result = sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
         .execute(executor)
         .await?;
     Ok(result.rows_affected())

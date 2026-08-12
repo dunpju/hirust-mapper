@@ -14,17 +14,17 @@ license = "MIT"
 
 [workspace.dependencies]
 # 核心解析依赖
-quick-xml = "0.38"
+quick-xml = "0.41.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
 lazy_static = "1.5"
 
 # 运行时依赖
-sqlx = { version = "0.8", default-features = false }
+sqlx = { version = "0.9.0", default-features = false }
 tokio = { version = "1", features = ["full"] }
-notify = "7"
-toml = "0.8"
+notify = "8.2.0"
+toml = "1.1.4"
 thiserror = "2"
 glob = "0.3"
 
@@ -35,7 +35,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # proc_macro 依赖
 quote = "1"
 proc-macro2 = "1"
-syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
+syn = { version = "3.0.3", features = ["full", "parsing", "extra-traits"] }
 
 [profile.release]
 opt-level = 3

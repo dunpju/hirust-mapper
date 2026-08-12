@@ -50,7 +50,7 @@ async fn setup(suffix: &str, mapper_xml: &str, schema: &str) -> (SqlSessionFacto
         .with_mapper_paths(vec!["mappers/**/*.xml".to_string()]);
 
     let factory = SqlSessionFactory::build(config, &temp).await.unwrap();
-    sqlx::query(schema).execute(factory.environment().pool()).await.unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(schema)).execute(factory.environment().pool()).await.unwrap();
     (factory, temp)
 }
 

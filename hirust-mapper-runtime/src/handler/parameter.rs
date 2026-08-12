@@ -21,7 +21,7 @@ use crate::error::{MapperRuntimeError, Result};
 /// | `Number` (浮点)    | `f64`             |
 /// | `String(s)`        | `String`          |
 /// | `Array` / `Object` | 序列化为 JSON 字符串 |
-pub fn bind_value(arguments: &mut AnyArguments<'_>, value: &Value) -> Result<()> {
+pub fn bind_value(arguments: &mut AnyArguments, value: &Value) -> Result<()> {
     let add_result: std::result::Result<(), sqlx::error::BoxDynError> = match value {
         Value::Null => arguments.add(Option::<i64>::None),
         Value::Bool(b) => arguments.add(*b),
@@ -55,9 +55,9 @@ impl ParameterHandler {
     /// 配合 [`sqlx::query_with`] 使用即可执行：
     /// ```ignore
     /// let args = ParameterHandler::bind_arguments(&bound)?;
-    /// let query = sqlx::query_with(&bound.sql, args);
+    /// let query = sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args);
     /// ```
-    pub fn bind_arguments(bound: &BoundSql) -> Result<AnyArguments<'_>> {
+    pub fn bind_arguments(bound: &BoundSql) -> Result<AnyArguments> {
         let mut arguments = AnyArguments::default();
         arguments.reserve(bound.parameters.len(), 0);
         for value in &bound.parameters {
@@ -67,7 +67,7 @@ impl ParameterHandler {
     }
 
     /// 绑定单个 Value 到已有参数缓冲区
-    pub fn bind_one(arguments: &mut AnyArguments<'_>, value: &Value) -> Result<()> {
+    pub fn bind_one(arguments: &mut AnyArguments, value: &Value) -> Result<()> {
         bind_value(arguments, value)
     }
 
@@ -125,7 +125,7 @@ mod tests {
         ];
 
         let args = ParameterHandler::bind_arguments(&bound).unwrap();
-        sqlx::query_with(&bound.sql, args)
+        sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
             .execute(&pool)
             .await
             .unwrap();
@@ -180,7 +180,7 @@ mod tests {
         ];
 
         let args = ParameterHandler::bind_arguments(&bound).unwrap();
-        sqlx::query_with(&bound.sql, args)
+        sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
             .execute(&pool)
             .await
             .unwrap();

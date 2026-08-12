@@ -33,5 +33,5 @@ pub trait TypeHandler: Send + Sync + 'static {
     ///
     /// 实现应按自身类型语义调用 [`sqlx::Arguments::add`]。
     /// 对不属于本类型的 Value（且非 Null）可返回错误或尽力转换。
-    fn set_parameter(&self, value: &Value, arguments: &mut AnyArguments<'_>) -> Result<()>;
+    fn set_parameter(&self, value: &Value, arguments: &mut AnyArguments) -> Result<()>;
 }

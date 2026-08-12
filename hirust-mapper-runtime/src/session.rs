@@ -225,7 +225,7 @@ impl SqlSession {
 
         if let Some(tx) = self.transaction.as_mut() {
             let conn: &mut sqlx::AnyConnection = tx; // deref coercion: &mut Transaction → &mut AnyConnection
-            sqlx::query_with(&bound.sql, args)
+            sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
                 .execute(&mut *conn)
                 .await
                 .map_err(MapperRuntimeError::Database)?;
@@ -237,7 +237,7 @@ impl SqlSession {
                 .acquire()
                 .await
                 .map_err(MapperRuntimeError::Database)?;
-            sqlx::query_with(&bound.sql, args)
+            sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
                 .execute(&mut *conn)
                 .await
                 .map_err(MapperRuntimeError::Database)?;
