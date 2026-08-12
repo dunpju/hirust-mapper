@@ -26,6 +26,10 @@ runtime = ["hirust-mapper-runtime"]
 macros = ["hirust-mapper-macros", "runtime"]
 # 全功能
 full = ["runtime", "macros"]
+# 数据库后端透传（full 之外按需启用一个）
+mysql = ["hirust-mapper-runtime/mysql"]
+postgres = ["hirust-mapper-runtime/postgres"]
+sqlite = ["hirust-mapper-runtime/sqlite"]
 
 [[example]]
 name = "runtime_basic"
