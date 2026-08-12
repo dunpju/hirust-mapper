@@ -5,4 +5,4 @@
 
 pub mod simple;
 
-pub use simple::SimpleExecutor;
+pub use simple::{execute_rows_affected, SimpleExecutor};

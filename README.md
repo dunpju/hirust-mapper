@@ -231,7 +231,7 @@ cargo run --example proc_macro_usage --features full       # 编译时 DAO 生�
 ## 测试
 
 ```sh
-cargo test --workspace     # 115 个测试（core 41 + runtime 46 + 集成 22（含流式 4、SQL 日志 2）+ macros 6）
+cargo test --workspace     # 116 个测试（core 41 + runtime 46 + 集成 23（含流式 4、SQL 日志 3）+ macros 6）
 ```
 
 ## License

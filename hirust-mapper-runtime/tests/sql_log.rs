@@ -6,8 +6,12 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, Once};
 
-use hirust_mapper_runtime::{EnvironmentConfig, HirustMapperConfig, SqlSessionFactory};
+use hirust_mapper_runtime::{
+    executor::execute_rows_affected, BoundSql, EnvironmentConfig, HirustMapperConfig, SqlLogConfig,
+    SqlSessionFactory,
+};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct User {
@@ -124,6 +128,37 @@ async fn test_sql_log_disabled_emits_nothing() {
     let after = LOGS.lock().unwrap().len();
 
     assert_eq!(after, before, "关闭 sql_log 时不应发射任何日志");
+
+    factory.close().await;
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[tokio::test]
+async fn test_execute_rows_affected_respects_config() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    install_logger();
+    let (factory, temp) = setup("rows_affected", false).await; // 全局关闭
+    let session = factory.open_session();
+    sqlx::query("DELETE FROM users").execute(session.pool()).await.unwrap();
+
+    // 显式传入开启的配置 → execute_rows_affected 应发射日志
+    let bound = BoundSql {
+        sql: "INSERT INTO users (name, age) VALUES (?, ?)".to_string(),
+        parameters: vec![json!("甲"), json!(1)],
+    };
+    let cfg_on = SqlLogConfig { enabled: true, slow_threshold_ms: 0 };
+    let before = LOGS.lock().unwrap().len();
+    let n = execute_rows_affected(&bound, session.pool(), &cfg_on).await.unwrap();
+    let after = LOGS.lock().unwrap().len();
+    assert_eq!(n, 1);
+    assert!(after > before, "传入开启配置时应发射日志");
+    assert!(LOGS.lock().unwrap()[before..after].join("\n").contains("INSERT INTO users"));
+
+    // 传入关闭的配置 → 不发射
+    let cfg_off = SqlLogConfig::default();
+    let before2 = LOGS.lock().unwrap().len();
+    let _ = execute_rows_affected(&bound, session.pool(), &cfg_off).await.unwrap();
+    assert_eq!(LOGS.lock().unwrap().len(), before2, "传入关闭配置时不应发射");
 
     factory.close().await;
     std::fs::remove_dir_all(temp).ok();

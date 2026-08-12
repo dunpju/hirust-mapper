@@ -157,14 +157,24 @@ impl SimpleExecutor {
     }
 }
 
-/// 独立辅助函数：执行绑定并返回受影响行数（无需 SimpleExecutor 实例）
-pub async fn execute_rows_affected<'q, E>(bound: &'q BoundSql, executor: E) -> Result<u64>
+/// 独立辅助函数：执行绑定并返回受影响行数（无需 SimpleExecutor 实例）。
+///
+/// `sql_log` 控制 SQL 执行日志；传入 [`SqlLogConfig::default`]（关闭）则不记录，
+/// 传入开启的配置则按与 [`SimpleExecutor::execute`] 相同的格式记录耗时与可读 SQL。
+pub async fn execute_rows_affected<'q, E>(
+    bound: &'q BoundSql,
+    executor: E,
+    sql_log: &SqlLogConfig,
+) -> Result<u64>
 where
     E: Executor<'q, Database = sqlx::Any>,
 {
     let args = ParameterHandler::bind_arguments(bound)?;
+    let start = Instant::now();
     let result = sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
         .execute(executor)
-        .await?;
+        .await;
+    crate::sql_log::log_execution(sql_log, bound, start.elapsed());
+    let result = result?;
     Ok(result.rows_affected())
 }
