@@ -9,6 +9,7 @@
 - **异步执行层** — 基于 sqlx，内置连接池、事务（begin/commit/rollback）、SimpleExecutor
 - **流式查询** — `select_for_each`（回调式）与 `query_stream` / `query_rows_stream`（sqlx fetch 流），大结果集低内存峰值
 - **SQL 执行日志** — `[settings] sql_log` 开关控制，输出「耗时 + 参数内联的可读 SQL」，经 `log` facade 输出，支持慢查询阈值
+- **事件系统** — 类型化 `Event`/`Listener` + `EventBus` 分发器 + `Subscriber` 批量订阅；内置 SQL 执行前/后生命周期事件，线程安全、无监听器零开销
 - **类型处理** — TypeHandler 体系（i32/i64/f64/bool/String + feature-gated chrono/uuid），`serde_json::Value` 通用中间表示
 - **ResultMap 嵌套映射** — `<association>` 一对一、`<collection>` 一对多分组、`<id>` 身份、`<selectKey>` 主键回填
 - **条件增强** — 支持 `.size()` / `.isEmpty()` 方法调用与布尔字面量
@@ -208,12 +209,60 @@ tracing_subscriber::fmt().with_env_filter("hirust_mapper::sql=info").init();
 
 `log` facade 在无后端时为零开销；关闭 `sql_log` 时执行点不做任何格式化与计时之外的工作。
 
+## 事件系统
+
+类型化的事件监听与订阅（灵感来自 ThinkPHP 模型事件，按 Rust 最佳实践实现）：
+
+- **`Event`** trait —— 任何实现它的类型即可作为事件（含自定义业务事件）。
+- **`Listener`** trait + 闭包 —— `bus.on(|e: &E| {...})` 即订阅；监听器收到不可变引用（观察者语义）。
+- **`Subscriber`** trait —— 在一个实现里批量注册多个事件（对应 ThinkPHP 的「事件订阅」）。
+- **`EventBus`** —— 线程安全的类型擦除分发器；派发时先克隆监听器列表、**释放锁后再回调**（监听器内可安全重入订阅/派发）；**无监听器时经原子读零开销跳过**。
+
+内置 ORM 生命周期事件，在 SQL 执行点自动派发：`BeforeSqlEvent`（执行前）/ `AfterSqlEvent`（含耗时与 `SqlOutcome` 结果摘要）。
+
+```rust
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use hirust_mapper::{
+    AfterSqlEvent, EventBus, Event, HirustMapperConfig, EnvironmentConfig,
+    SqlSessionFactory, SqlOutcome, Subscriber,
+};
+
+// 1) 自定义事件
+struct LoginEvent { user: String }
+impl Event for LoginEvent {}
+
+// 2) 订阅器：批量注册多个事件
+struct Audit { count: Arc<AtomicUsize> }
+impl Subscriber for Audit {
+    fn subscribe(&self, bus: &EventBus) {
+        let c = Arc::clone(&self.count);
+        bus.on(move |e: &AfterSqlEvent| {
+            c.fetch_add(1, Ordering::Relaxed);
+            println!("{:?} {:?}", e.kind, e.outcome);
+        });
+    }
+}
+
+let factory = SqlSessionFactory::build(config, ".").await?;
+factory.event_bus().add_subscriber(&Audit { count: Arc::new(AtomicUsize::new(0)) });
+factory.event_bus().on(|e: &LoginEvent| println!("{} 登录", e.user));
+
+let mut session = factory.open_session();
+session.insert("app.U", "insert", &user).await?;       // 触发 Before/After SQL 事件
+factory.event_bus().dispatch(&LoginEvent { user: "张三".into() }); // 派发自定义事件
+```
+
+> 监听器为**同步回调**（在派发点内联调用）；耗时或异步工作请在监听器内 `tokio::spawn`。
+> 流式查询（`select_for_each`/`query_stream`）暂不派发 SQL 事件（按行流式的「耗时」语义不明确）。
+
 ## 示例
 
 仓库内含可运行示例：
 
 ```sh
 cargo run --example runtime_basic --features runtime      # 运行时 API CRUD + 事务
+cargo run --example events_usage --features runtime       # 事件监听与订阅
 cargo run --example proc_macro_usage --features full       # 编译时 DAO 生成
 ```
 
@@ -231,7 +280,7 @@ cargo run --example proc_macro_usage --features full       # 编译时 DAO 生�
 ## 测试
 
 ```sh
-cargo test --workspace     # 116 个测试（core 41 + runtime 46 + 集成 23（含流式 4、SQL 日志 3）+ macros 6）
+cargo test --workspace     # 129 个测试（core 41 + runtime 56 + 集成 26（含流式 4、SQL 日志 3、事件 3）+ macros 6）
 ```
 
 ## License

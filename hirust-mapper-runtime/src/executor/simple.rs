@@ -15,6 +15,8 @@ use sqlx::any::{AnyQueryResult, AnyRow};
 use sqlx::Executor;
 
 use crate::error::Result;
+use crate::event::lifecycle::{classify_sql, AfterSqlEvent, BeforeSqlEvent, SqlKind, SqlOutcome};
+use crate::event::EventBus;
 use crate::handler::parameter::ParameterHandler;
 use crate::handler::result_set::ResultSetHandler;
 use crate::sql_log::SqlLogConfig;
@@ -22,10 +24,11 @@ use crate::type_handler::TypeHandlerRegistry;
 
 /// 基础执行器
 ///
-/// 无状态（除类型处理器注册表与 SQL 日志配置），可被多个 Session 共享。
+/// 无状态（除类型处理器注册表、SQL 日志配置与事件总线），可被多个 Session 共享。
 pub struct SimpleExecutor {
     type_handler_registry: Arc<TypeHandlerRegistry>,
     sql_log: Arc<SqlLogConfig>,
+    event_bus: Arc<EventBus>,
 }
 
 impl SimpleExecutor {
@@ -34,6 +37,7 @@ impl SimpleExecutor {
         Self {
             type_handler_registry,
             sql_log: Arc::new(SqlLogConfig::default()),
+            event_bus: Arc::new(EventBus::new()),
         }
     }
 
@@ -48,6 +52,17 @@ impl SimpleExecutor {
         self
     }
 
+    /// 设置事件总线（用于派发 SQL 执行前/后生命周期事件）
+    pub fn with_event_bus(mut self, event_bus: Arc<EventBus>) -> Self {
+        self.event_bus = event_bus;
+        self
+    }
+
+    /// 事件总线引用
+    pub fn event_bus(&self) -> &EventBus {
+        &self.event_bus
+    }
+
     /// 类型处理器注册表
     pub fn type_handler_registry(&self) -> &TypeHandlerRegistry {
         &self.type_handler_registry
@@ -59,12 +74,29 @@ impl SimpleExecutor {
         E: Executor<'q, Database = sqlx::Any>,
     {
         let args = ParameterHandler::bind_arguments(bound)?;
+        let bus = &self.event_bus;
+        bus.dispatch_if(|| BeforeSqlEvent {
+            raw_sql: bound.sql.clone(),
+            params: bound.parameters.clone(),
+            kind: SqlKind::Select,
+        });
         let start = Instant::now();
         let result = sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
             .fetch_all(executor)
             .await
-            .map_err(Into::into);
-        crate::sql_log::log_execution(&self.sql_log, bound, start.elapsed());
+            .map_err(crate::error::MapperRuntimeError::from);
+        let elapsed = start.elapsed();
+        crate::sql_log::log_execution(&self.sql_log, bound, elapsed);
+        bus.dispatch_if(|| AfterSqlEvent {
+            raw_sql: bound.sql.clone(),
+            params: bound.parameters.clone(),
+            kind: SqlKind::Select,
+            elapsed,
+            outcome: match &result {
+                Ok(rows) => SqlOutcome::Fetched(rows.len()),
+                Err(e) => SqlOutcome::Failed(e.to_string()),
+            },
+        });
         result
     }
 
@@ -147,34 +179,71 @@ impl SimpleExecutor {
         E: Executor<'q, Database = sqlx::Any>,
     {
         let args = ParameterHandler::bind_arguments(bound)?;
+        let kind = classify_sql(&bound.sql);
+        let bus = &self.event_bus;
+        bus.dispatch_if(|| BeforeSqlEvent {
+            raw_sql: bound.sql.clone(),
+            params: bound.parameters.clone(),
+            kind,
+        });
         let start = Instant::now();
         let result = sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
             .execute(executor)
             .await
-            .map_err(Into::into);
-        crate::sql_log::log_execution(&self.sql_log, bound, start.elapsed());
+            .map_err(crate::error::MapperRuntimeError::from);
+        let elapsed = start.elapsed();
+        crate::sql_log::log_execution(&self.sql_log, bound, elapsed);
+        bus.dispatch_if(|| AfterSqlEvent {
+            raw_sql: bound.sql.clone(),
+            params: bound.parameters.clone(),
+            kind,
+            elapsed,
+            outcome: match &result {
+                Ok(r) => SqlOutcome::Affected(r.rows_affected()),
+                Err(e) => SqlOutcome::Failed(e.to_string()),
+            },
+        });
         result
     }
 }
 
 /// 独立辅助函数：执行绑定并返回受影响行数（无需 SimpleExecutor 实例）。
 ///
-/// `sql_log` 控制 SQL 执行日志；传入 [`SqlLogConfig::default`]（关闭）则不记录，
-/// 传入开启的配置则按与 [`SimpleExecutor::execute`] 相同的格式记录耗时与可读 SQL。
+/// `sql_log` 控制 SQL 执行日志；`event_bus` 用于派发执行前/后生命周期事件。
+/// 传入 [`SqlLogConfig::default`]（关闭）则不记录，传入空 [`EventBus`] 则不派发。
 pub async fn execute_rows_affected<'q, E>(
     bound: &'q BoundSql,
     executor: E,
     sql_log: &SqlLogConfig,
+    event_bus: &EventBus,
 ) -> Result<u64>
 where
     E: Executor<'q, Database = sqlx::Any>,
 {
     let args = ParameterHandler::bind_arguments(bound)?;
+    let kind = classify_sql(&bound.sql);
+    event_bus.dispatch_if(|| BeforeSqlEvent {
+        raw_sql: bound.sql.clone(),
+        params: bound.parameters.clone(),
+        kind,
+    });
     let start = Instant::now();
     let result = sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
         .execute(executor)
         .await;
-    crate::sql_log::log_execution(sql_log, bound, start.elapsed());
+    let elapsed = start.elapsed();
+    crate::sql_log::log_execution(sql_log, bound, elapsed);
+    let outcome = match &result {
+        Ok(r) => SqlOutcome::Affected(r.rows_affected()),
+        Err(e) => SqlOutcome::Failed(e.to_string()),
+    };
+    event_bus.dispatch_if(|| AfterSqlEvent {
+        raw_sql: bound.sql.clone(),
+        params: bound.parameters.clone(),
+        kind,
+        elapsed,
+        outcome,
+    });
     let result = result?;
     Ok(result.rows_affected())
 }

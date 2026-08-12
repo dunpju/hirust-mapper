@@ -32,5 +32,9 @@ name = "runtime_basic"
 required-features = ["runtime"]
 
 [[example]]
+name = "events_usage"
+required-features = ["runtime"]
+
+[[example]]
 name = "proc_macro_usage"
 required-features = ["full"]

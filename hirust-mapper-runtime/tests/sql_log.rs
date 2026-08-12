@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::sync::{Mutex, Once};
 
 use hirust_mapper_runtime::{
-    executor::execute_rows_affected, BoundSql, EnvironmentConfig, HirustMapperConfig, SqlLogConfig,
-    SqlSessionFactory,
+    executor::execute_rows_affected, BoundSql, EnvironmentConfig, EventBus, HirustMapperConfig,
+    SqlLogConfig, SqlSessionFactory,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -147,8 +147,9 @@ async fn test_execute_rows_affected_respects_config() {
         parameters: vec![json!("甲"), json!(1)],
     };
     let cfg_on = SqlLogConfig { enabled: true, slow_threshold_ms: 0 };
+    let bus = EventBus::new();
     let before = LOGS.lock().unwrap().len();
-    let n = execute_rows_affected(&bound, session.pool(), &cfg_on).await.unwrap();
+    let n = execute_rows_affected(&bound, session.pool(), &cfg_on, &bus).await.unwrap();
     let after = LOGS.lock().unwrap().len();
     assert_eq!(n, 1);
     assert!(after > before, "传入开启配置时应发射日志");
@@ -157,7 +158,7 @@ async fn test_execute_rows_affected_respects_config() {
     // 传入关闭的配置 → 不发射
     let cfg_off = SqlLogConfig::default();
     let before2 = LOGS.lock().unwrap().len();
-    let _ = execute_rows_affected(&bound, session.pool(), &cfg_off).await.unwrap();
+    let _ = execute_rows_affected(&bound, session.pool(), &cfg_off, &bus).await.unwrap();
     assert_eq!(LOGS.lock().unwrap().len(), before2, "传入关闭配置时不应发射");
 
     factory.close().await;

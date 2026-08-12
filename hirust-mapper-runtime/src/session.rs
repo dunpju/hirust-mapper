@@ -22,6 +22,8 @@ use serde_json::Value;
 
 use crate::environment::Environment;
 use crate::error::{MapperRuntimeError, Result};
+use crate::event::lifecycle::{AfterSqlEvent, BeforeSqlEvent, SqlKind, SqlOutcome};
+use crate::event::EventBus;
 use crate::executor::SimpleExecutor;
 use crate::registry::{MapperRegistry, TypeAliasRegistry};
 use crate::sql_log::SqlLogConfig;
@@ -34,6 +36,7 @@ pub struct SqlSession {
     type_alias_registry: Arc<TypeAliasRegistry>,
     type_handler_registry: Arc<TypeHandlerRegistry>,
     sql_log: Arc<SqlLogConfig>,
+    event_bus: Arc<EventBus>,
     executor: SimpleExecutor,
     transaction: Option<sqlx::Transaction<'static, sqlx::Any>>,
     closed: bool,
@@ -57,15 +60,18 @@ impl SqlSession {
         type_alias_registry: Arc<TypeAliasRegistry>,
         type_handler_registry: Arc<TypeHandlerRegistry>,
         sql_log: Arc<SqlLogConfig>,
+        event_bus: Arc<EventBus>,
     ) -> Self {
         let executor = SimpleExecutor::new(Arc::clone(&type_handler_registry))
-            .with_sql_log(Arc::clone(&sql_log));
+            .with_sql_log(Arc::clone(&sql_log))
+            .with_event_bus(Arc::clone(&event_bus));
         Self {
             environment,
             mapper_registry,
             type_alias_registry,
             type_handler_registry,
             sql_log,
+            event_bus,
             executor,
             transaction: None,
             closed: false,
@@ -102,6 +108,11 @@ impl SqlSession {
     /// 执行器引用
     pub fn executor(&self) -> &SimpleExecutor {
         &self.executor
+    }
+
+    /// 事件总线引用（用于注册 SQL 执行前/后事件监听器）
+    pub fn event_bus(&self) -> &EventBus {
+        &self.event_bus
     }
 
     /// 是否处于事务中
@@ -261,14 +272,30 @@ impl SqlSession {
         let args = crate::handler::parameter::ParameterHandler::bind_arguments(&bound)?;
         let driver = self.environment.driver();
 
+        self.event_bus.dispatch_if(|| BeforeSqlEvent {
+            raw_sql: bound.sql.clone(),
+            params: bound.parameters.clone(),
+            kind: SqlKind::Insert,
+        });
         let start = Instant::now();
         if let Some(tx) = self.transaction.as_mut() {
             let conn: &mut sqlx::AnyConnection = tx; // deref coercion: &mut Transaction → &mut AnyConnection
-            sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
+            let exec_result = sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
                 .execute(&mut *conn)
-                .await
-                .map_err(MapperRuntimeError::Database)?;
-            crate::sql_log::log_execution(&self.sql_log, &bound, start.elapsed());
+                .await;
+            let elapsed = start.elapsed();
+            crate::sql_log::log_execution(&self.sql_log, &bound, elapsed);
+            self.event_bus.dispatch_if(|| AfterSqlEvent {
+                raw_sql: bound.sql.clone(),
+                params: bound.parameters.clone(),
+                kind: SqlKind::Insert,
+                elapsed,
+                outcome: match &exec_result {
+                    Ok(r) => SqlOutcome::Affected(r.rows_affected()),
+                    Err(e) => SqlOutcome::Failed(e.to_string()),
+                },
+            });
+            exec_result.map_err(MapperRuntimeError::Database)?;
             Ok(Self::fetch_last_insert_id(conn, driver).await?)
         } else {
             let mut conn = self
@@ -277,11 +304,22 @@ impl SqlSession {
                 .acquire()
                 .await
                 .map_err(MapperRuntimeError::Database)?;
-            sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
+            let exec_result = sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
                 .execute(&mut *conn)
-                .await
-                .map_err(MapperRuntimeError::Database)?;
-            crate::sql_log::log_execution(&self.sql_log, &bound, start.elapsed());
+                .await;
+            let elapsed = start.elapsed();
+            crate::sql_log::log_execution(&self.sql_log, &bound, elapsed);
+            self.event_bus.dispatch_if(|| AfterSqlEvent {
+                raw_sql: bound.sql.clone(),
+                params: bound.parameters.clone(),
+                kind: SqlKind::Insert,
+                elapsed,
+                outcome: match &exec_result {
+                    Ok(r) => SqlOutcome::Affected(r.rows_affected()),
+                    Err(e) => SqlOutcome::Failed(e.to_string()),
+                },
+            });
+            exec_result.map_err(MapperRuntimeError::Database)?;
             Ok(Self::fetch_last_insert_id(&mut conn, driver).await?)
         }
     }

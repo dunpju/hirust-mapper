@@ -10,6 +10,7 @@ use std::sync::{Arc, RwLock};
 use crate::config::HirustMapperConfig;
 use crate::environment::Environment;
 use crate::error::Result;
+use crate::event::EventBus;
 use crate::hot_reload::{extract_watch_dirs, MapperWatcher};
 use crate::registry::{MapperRegistry, TypeAliasRegistry};
 use crate::sql_log::SqlLogConfig;
@@ -35,6 +36,7 @@ pub struct SqlSessionFactory {
     type_alias_registry: Arc<TypeAliasRegistry>,
     type_handler_registry: Arc<TypeHandlerRegistry>,
     sql_log: Arc<SqlLogConfig>,
+    event_bus: Arc<EventBus>,
     config: HirustMapperConfig,
     base_dir: std::path::PathBuf,
     /// 热重载监视器（None 表示未启用热重载）
@@ -86,6 +88,9 @@ impl SqlSessionFactory {
             slow_threshold_ms: config.settings.sql_log_slow_threshold_ms,
         });
 
+        // 事件总线（SQL 执行前/后生命周期事件；无监听器时派发零开销）
+        let event_bus = Arc::new(EventBus::new());
+
         // 4. 热重载（当 refresh_interval > 0 时启动）
         let watcher = if config.settings.mapper_refresh_interval_ms > 0 {
             let watch_dirs = extract_watch_dirs(&config.settings.mapper_paths, &base_dir);
@@ -118,6 +123,7 @@ impl SqlSessionFactory {
             type_alias_registry,
             type_handler_registry,
             sql_log,
+            event_bus,
             config,
             base_dir,
             watcher,
@@ -143,10 +149,16 @@ impl SqlSessionFactory {
             type_alias_registry: Arc::new(type_alias_registry),
             type_handler_registry: Arc::new(type_handler_registry),
             sql_log,
+            event_bus: Arc::new(EventBus::new()),
             config,
             base_dir,
             watcher: None,
         }
+    }
+
+    /// 事件总线引用（注册 SQL 执行前/后事件监听器，所有 session 共享）
+    pub fn event_bus(&self) -> &EventBus {
+        &self.event_bus
     }
 
     /// 数据库环境引用
@@ -207,6 +219,7 @@ impl SqlSessionFactory {
             Arc::clone(&self.type_alias_registry),
             Arc::clone(&self.type_handler_registry),
             Arc::clone(&self.sql_log),
+            Arc::clone(&self.event_bus),
         )
     }
 
