@@ -96,8 +96,10 @@ impl<E: Event> ErasedListener for Erased<E> {
 ///
 /// 一个 `EventBus` 可被多处共享（`Arc<EventBus>`），监听器在其生命周期内常驻。
 pub struct EventBus {
-    /// 事件类型(TypeId) → 该类型的监听器列表（类型擦除）
-    listeners: RwLock<HashMap<TypeId, Vec<Arc<dyn ErasedListener>>>>,
+    /// 事件类型(TypeId) → 该类型的监听器列表（不可变切片，`Arc` 共享）
+    /// 存 `Arc<[...]>` 而非 `Vec`：派发时只需克隆 `Arc`（1 次原子自增、零分配），
+    /// 订阅时重建切片（罕见路径）。派发读锁释放后再回调，监听器内可安全重入。
+    listeners: RwLock<HashMap<TypeId, Arc<[Arc<dyn ErasedListener>]>>>,
     /// 所有事件类型的监听器总数；用于无监听器时的锁原子快路径
     total: AtomicUsize,
 }
@@ -123,7 +125,17 @@ impl EventBus {
         let erased: Arc<dyn ErasedListener> = Arc::new(Erased(listener));
         {
             let mut map = self.listeners.write().expect("EventBus 锁中毒");
-            map.entry(key).or_default().push(erased);
+            // 重建切片（订阅是罕见路径，重建成本可接受；换取派发的零分配）
+            let new: Arc<[Arc<dyn ErasedListener>]> = match map.get(&key) {
+                Some(existing) => {
+                    let mut v = Vec::with_capacity(existing.len() + 1);
+                    v.extend(existing.iter().cloned());
+                    v.push(erased);
+                    Arc::from(v)
+                }
+                None => Arc::from(vec![erased]),
+            };
+            map.insert(key, new);
         }
         self.total.fetch_add(1, Ordering::Relaxed);
     }
@@ -142,10 +154,12 @@ impl EventBus {
         subscriber.subscribe(self);
     }
 
-    /// 派发事件：按注册顺序同步调用 `E` 的所有监听器。无监听器时零开销。
+    /// 派发事件：按注册顺序同步调用 `E` 的所有监听器。无监听器时零开销（一次原子读）。
     pub fn dispatch<E: Event>(&self, event: &E) {
-        let listeners = self.listeners_for::<E>();
-        for l in &listeners {
+        let Some(listeners) = self.snapshot::<E>() else {
+            return;
+        };
+        for l in listeners.iter() {
             l.handle_any(event);
         }
     }
@@ -156,12 +170,11 @@ impl EventBus {
     where
         F: FnOnce() -> E,
     {
-        let listeners = self.listeners_for::<E>();
-        if listeners.is_empty() {
+        let Some(listeners) = self.snapshot::<E>() else {
             return;
-        }
+        };
         let event = build();
-        for l in &listeners {
+        for l in listeners.iter() {
             l.handle_any(&event);
         }
     }
@@ -188,14 +201,17 @@ impl EventBus {
         self.total.load(Ordering::Relaxed)
     }
 
-    /// 取出 `E` 的监听器列表（克隆 Arc，随后释放锁 → 回调可安全重入）
-    fn listeners_for<E: Event>(&self) -> Vec<Arc<dyn ErasedListener>> {
+    /// 取 `E` 监听器切片的 `Arc` 快照（读锁内一次 `Arc::clone`，无分配；锁随后释放）。
+    /// 无监听器返回 `None`（不创建任何 `Arc`，快路径零分配）。
+    fn snapshot<E: Event>(&self) -> Option<Arc<[Arc<dyn ErasedListener>]>> {
         if self.total.load(Ordering::Relaxed) == 0 {
-            return Vec::new();
+            return None;
         }
-        let key = TypeId::of::<E>();
         let map = self.listeners.read().expect("EventBus 锁中毒");
-        map.get(&key).cloned().unwrap_or_default()
+        match map.get(&TypeId::of::<E>()) {
+            Some(v) if !v.is_empty() => Some(Arc::clone(v)),
+            _ => None,
+        }
     }
 }
 
@@ -325,19 +341,28 @@ mod tests {
 
     #[test]
     fn test_reentrant_subscribe_during_dispatch() {
-        // 派发期间监听器再次订阅 —— 不应死锁（锁已在回调前释放）
+        // 派发期间监听器再次订阅 —— 不应死锁（锁已在回调前释放，且派发用的是切片快照）
         let bus = Arc::new(EventBus::new());
         let bus2 = Arc::clone(&bus);
         let added = Arc::new(AtomicUsize::new(0));
         let a = Arc::clone(&added);
         bus.on(move |_: &LoginEvent| {
             a.fetch_add(1, Ordering::Relaxed);
-            // 在回调中新增一个监听器
+            // 在回调中新增一个监听器：重建切片，不影响当前派发（用的是旧快照）
             bus2.on(|_: &LoginEvent| {});
         });
         bus.dispatch(&LoginEvent { user: "x".into() });
         assert_eq!(added.load(Ordering::Relaxed), 1);
         assert_eq!(bus.listener_count::<LoginEvent>(), 2, "回调中应已新增一个监听器");
+        // 再次派发应触发 2 个监听器
+        let second = Arc::new(AtomicUsize::new(0));
+        let s = Arc::clone(&second);
+        bus.on(move |_: &LoginEvent| {
+            s.fetch_add(1, Ordering::Relaxed);
+        });
+        // 现有 3 个；dispatch 一次
+        bus.dispatch(&LoginEvent { user: "y".into() });
+        assert_eq!(second.load(Ordering::Relaxed), 1, "新监听器应被后续派发触发");
     }
 
     #[test]
@@ -345,7 +370,7 @@ mod tests {
         let bus = EventBus::new();
         assert_eq!(bus.total_listeners(), 0);
         assert!(!bus.has_listeners::<LoginEvent>());
-        // 无监听器派发不应 panic
+        // 无监听器派发不应 panic、不分配
         bus.dispatch(&LoginEvent { user: "x".into() });
         bus.dispatch_if(|| LoginEvent { user: "y".into() });
     }

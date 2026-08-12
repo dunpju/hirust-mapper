@@ -277,13 +277,15 @@ impl SqlSession {
             params: bound.parameters.clone(),
             kind: SqlKind::Insert,
         });
-        let start = Instant::now();
+        // 仅当 SQL 日志开启 或 有 AfterSqlEvent 监听器时才计时（全关时零开销）
+        let need_timing = self.sql_log.enabled || self.event_bus.has_listeners::<AfterSqlEvent>();
+        let start = need_timing.then(Instant::now);
         if let Some(tx) = self.transaction.as_mut() {
             let conn: &mut sqlx::AnyConnection = tx; // deref coercion: &mut Transaction → &mut AnyConnection
             let exec_result = sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
                 .execute(&mut *conn)
                 .await;
-            let elapsed = start.elapsed();
+            let elapsed = start.map(|s| s.elapsed()).unwrap_or_default();
             crate::sql_log::log_execution(&self.sql_log, &bound, elapsed);
             self.event_bus.dispatch_if(|| AfterSqlEvent {
                 raw_sql: bound.sql.clone(),
@@ -307,7 +309,7 @@ impl SqlSession {
             let exec_result = sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
                 .execute(&mut *conn)
                 .await;
-            let elapsed = start.elapsed();
+            let elapsed = start.map(|s| s.elapsed()).unwrap_or_default();
             crate::sql_log::log_execution(&self.sql_log, &bound, elapsed);
             self.event_bus.dispatch_if(|| AfterSqlEvent {
                 raw_sql: bound.sql.clone(),
