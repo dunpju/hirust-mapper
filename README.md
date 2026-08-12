@@ -185,6 +185,46 @@ sql_log_slow_threshold_ms = 0          # 慢查询阈值(ms)：仅记录耗时�
 "long" = "i64"
 ```
 
+## 配置优先级与环境变量
+
+配置来源分三层，优先级 **环境变量 > 编程设置 > TOML 默认值**。环境变量只在**设置时**覆盖对应字段，
+未设置则保留编程/TOML 值——适合容器/CI 部署时无需改 TOML 即可覆盖连接、日志等。
+
+```rust
+use hirust_mapper::HirustMapperConfig;
+
+// 链式：TOML → 编程 → env（env 最后应用，优先级最高）
+let config = HirustMapperConfig::load_file("hirust-mapper.toml")?
+    .with_url("programmatic-url")      // 编程覆盖
+    .with_type_alias("money", "Decimal")
+    .with_env_overrides()?;            // 应用进程环境变量覆盖
+```
+
+也可一站式加载：`HirustMapperConfig::load_layered("hirust-mapper.toml")?`（= TOML + env）。
+
+支持的环境变量：
+
+| 变量 | 覆盖字段 | 示例 |
+|------|----------|------|
+| `HIRUST_MAPPER_DRIVER` | `environment.driver` | `postgres` |
+| `HIRUST_MAPPER_URL`（或 `DATABASE_URL`） | `environment.url` | `postgres://u:p@h/db` |
+| `HIRUST_MAPPER_POOL_MAX` / `_POOL_MIN` | 连接池大小 | `20` / `2` |
+| `HIRUST_MAPPER_PATHS` | `settings.mapper_paths` | `a/*.xml,b/**/*.xml` |
+| `HIRUST_MAPPER_REFRESH_MS` | 热重载间隔 | `3000` |
+| `HIRUST_MAPPER_SQL_LOG` | SQL 日志开关 | `true` |
+| `HIRUST_MAPPER_SQL_LOG_SLOW_MS` | 慢查询阈值 | `100` |
+| `HIRUST_MAPPER_TYPE_ALIASES` | 类型别名（合并） | `int=i32,long=i64` |
+
+```sh
+# 12-factor 部署示例：仅用环境变量覆盖连接与慢查询阈值
+DATABASE_URL=postgres://prod:secret@db:5432/app \
+HIRUST_MAPPER_SQL_LOG=true \
+HIRUST_MAPPER_SQL_LOG_SLOW_MS=200 \
+    ./your_app
+```
+
+非法值（如非数字、非布尔）会返回 `MapperRuntimeError::Config`，不静默吞错。
+
 ## SQL 执行日志
 
 在 `[settings]` 中设置 `sql_log = true`（或编程式 `.with_sql_log(true)`），即可对每次 SQL 执行输出「耗时 + 参数内联的可读 SQL」：

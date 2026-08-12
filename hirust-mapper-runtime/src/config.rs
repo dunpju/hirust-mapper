@@ -2,6 +2,37 @@
 //!
 //! 解析 `hirust-mapper.toml` 配置文件，定义数据库连接、mapper 路径、类型别名等。
 //! 同时提供基于 glob 的 XML mapper 文件发现能力。
+//!
+//! # 配置优先级（高 → 低）
+//!
+//! 1. **环境变量**（`HIRUST_MAPPER_*`，部署/CI 覆盖用）
+//! 2. **编程式 builder**（`with_*` 方法）
+//! 3. **TOML 文件默认值**（`load_file`）
+//!
+//! env 层只在变量**存在时**覆盖对应字段（缺失则保留编程/TOML 值）。通过应用顺序编码优先级——
+//! 把 `with_env_overrides()` 放在链式调用最后：
+//!
+//! ```no_run
+//! # use hirust_mapper_runtime::HirustMapperConfig;
+//! let config = HirustMapperConfig::load_file("hirust-mapper.toml")?  // 3. TOML
+//!     .with_url("programmatic-url")                                  // 2. 编程（非 Result）
+//!     .with_env_overrides()?;                                        // 1. env（最高）
+//! # Ok::<(), hirust_mapper_runtime::MapperRuntimeError>(())
+//! ```
+//!
+//! ## 支持的环境变量
+//!
+//! | 变量 | 覆盖字段 | 解析 |
+//! |------|----------|------|
+//! | `HIRUST_MAPPER_DRIVER` | `environment.driver` | 字符串 |
+//! | `HIRUST_MAPPER_URL`（或 `DATABASE_URL`） | `environment.url` | 字符串（前者优先） |
+//! | `HIRUST_MAPPER_POOL_MAX` | `environment.pool_max_connections` | u32 |
+//! | `HIRUST_MAPPER_POOL_MIN` | `environment.pool_min_connections` | u32 |
+//! | `HIRUST_MAPPER_PATHS` | `settings.mapper_paths` | 逗号分隔列表 |
+//! | `HIRUST_MAPPER_REFRESH_MS` | `settings.mapper_refresh_interval_ms` | u64 |
+//! | `HIRUST_MAPPER_SQL_LOG` | `settings.sql_log` | 布尔（true/1/yes/false/0/no） |
+//! | `HIRUST_MAPPER_SQL_LOG_SLOW_MS` | `settings.sql_log_slow_threshold_ms` | u64 |
+//! | `HIRUST_MAPPER_TYPE_ALIASES` | `type_aliases` | 逗号分隔 `name=type`（合并） |
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -127,6 +158,42 @@ impl HirustMapperConfig {
         self
     }
 
+    /// 单独覆盖 driver（不影响 url / 连接池等其他环境字段）
+    pub fn with_driver(mut self, driver: impl Into<String>) -> Self {
+        self.environment.driver = driver.into();
+        self
+    }
+
+    /// 单独覆盖数据库连接 URL
+    pub fn with_url(mut self, url: impl Into<String>) -> Self {
+        self.environment.url = url.into();
+        self
+    }
+
+    /// 单独覆盖连接池最大连接数
+    pub fn with_pool_max_connections(mut self, max: u32) -> Self {
+        self.environment.pool_max_connections = max;
+        self
+    }
+
+    /// 单独覆盖连接池最小连接数
+    pub fn with_pool_min_connections(mut self, min: u32) -> Self {
+        self.environment.pool_min_connections = min;
+        self
+    }
+
+    /// 注册单个类型别名（合并入现有 map）
+    pub fn with_type_alias(mut self, alias: impl Into<String>, full_path: impl Into<String>) -> Self {
+        self.type_aliases.insert(alias.into(), full_path.into());
+        self
+    }
+
+    /// 整体替换类型别名表
+    pub fn with_type_aliases(mut self, aliases: HashMap<String, String>) -> Self {
+        self.type_aliases = aliases;
+        self
+    }
+
     /// 设置 mapper 路径
     pub fn with_mapper_paths(mut self, paths: Vec<String>) -> Self {
         self.settings.mapper_paths = paths;
@@ -152,6 +219,74 @@ impl HirustMapperConfig {
     pub fn with_sql_log_slow_threshold_ms(mut self, threshold_ms: u64) -> Self {
         self.settings.sql_log_slow_threshold_ms = threshold_ms;
         self
+    }
+
+    // ─── 环境变量覆盖层 ─────────────────────────────────────────────
+
+    /// 从指定 env 源应用环境变量覆盖（仅覆盖已设置的变量）。
+    ///
+    /// 优先级最高：在 TOML / 编程设置之后调用。变量缺失则保留原值；解析失败返回
+    /// `Config` 错误（不静默吞错）。生产用 [`StdEnv`](crate::config::StdEnv)。
+    pub fn apply_env_overrides_from(&mut self, src: &dyn EnvSource) -> Result<()> {
+        if let Some(v) = src.get(ENV_DRIVER) {
+            self.environment.driver = v;
+        }
+        // HIRUST_MAPPER_URL 优先于 DATABASE_URL 别名
+        if let Some(v) = src.get(ENV_URL).or_else(|| src.get(ENV_DATABASE_URL)) {
+            self.environment.url = v;
+        }
+        if let Some(v) = src.get(ENV_POOL_MAX) {
+            self.environment.pool_max_connections =
+                parse_u32(&v, ENV_POOL_MAX)?;
+        }
+        if let Some(v) = src.get(ENV_POOL_MIN) {
+            self.environment.pool_min_connections =
+                parse_u32(&v, ENV_POOL_MIN)?;
+        }
+        if let Some(v) = src.get(ENV_PATHS) {
+            self.settings.mapper_paths = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        if let Some(v) = src.get(ENV_REFRESH_MS) {
+            self.settings.mapper_refresh_interval_ms = parse_u64(&v, ENV_REFRESH_MS)?;
+        }
+        if let Some(v) = src.get(ENV_SQL_LOG) {
+            self.settings.sql_log = parse_bool(&v, ENV_SQL_LOG)?;
+        }
+        if let Some(v) = src.get(ENV_SQL_LOG_SLOW_MS) {
+            self.settings.sql_log_slow_threshold_ms = parse_u64(&v, ENV_SQL_LOG_SLOW_MS)?;
+        }
+        if let Some(v) = src.get(ENV_TYPE_ALIASES) {
+            for (k, t) in parse_aliases(&v)? {
+                self.type_aliases.insert(k, t);
+            }
+        }
+        Ok(())
+    }
+
+    /// 从进程环境变量（`std::env`）应用覆盖。
+    pub fn apply_env_overrides(&mut self) -> Result<()> {
+        self.apply_env_overrides_from(&StdEnv)
+    }
+
+    /// 消费式：应用 env 覆盖后返回 self（链式，来自指定源）。
+    pub fn with_env_overrides_from(mut self, src: &dyn EnvSource) -> Result<Self> {
+        self.apply_env_overrides_from(src)?;
+        Ok(self)
+    }
+
+    /// 消费式：应用进程环境变量覆盖后返回 self（链式）。
+    pub fn with_env_overrides(mut self) -> Result<Self> {
+        self.apply_env_overrides()?;
+        Ok(self)
+    }
+
+    /// 一站式分层加载：TOML 文件 → 进程环境变量覆盖。
+    pub fn load_layered<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Self::load_file(path)?.with_env_overrides()
     }
 
     /// 按 glob 模式发现所有 XML mapper 文件
@@ -182,6 +317,85 @@ impl HirustMapperConfig {
         files.dedup();
         Ok(files)
     }
+}
+
+// ─── 环境变量层：源抽象 + 解析辅助 ──────────────────────────────────
+
+/// 环境变量来源抽象。
+///
+/// 生产用 [`StdEnv`]（读 `std::env`）；测试可传入自定义实现以避免并行测试竞态。
+pub trait EnvSource {
+    /// 读取指定变量；不存在返回 `None`。
+    fn get(&self, key: &str) -> Option<String>;
+}
+
+/// 进程环境变量源（生产用）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StdEnv;
+
+impl EnvSource for StdEnv {
+    fn get(&self, key: &str) -> Option<String> {
+        std::env::var(key).ok()
+    }
+}
+
+// 环境变量名常量（集中定义，便于维护与文档）
+const ENV_DRIVER: &str = "HIRUST_MAPPER_DRIVER";
+const ENV_URL: &str = "HIRUST_MAPPER_URL";
+const ENV_DATABASE_URL: &str = "DATABASE_URL";
+const ENV_POOL_MAX: &str = "HIRUST_MAPPER_POOL_MAX";
+const ENV_POOL_MIN: &str = "HIRUST_MAPPER_POOL_MIN";
+const ENV_PATHS: &str = "HIRUST_MAPPER_PATHS";
+const ENV_REFRESH_MS: &str = "HIRUST_MAPPER_REFRESH_MS";
+const ENV_SQL_LOG: &str = "HIRUST_MAPPER_SQL_LOG";
+const ENV_SQL_LOG_SLOW_MS: &str = "HIRUST_MAPPER_SQL_LOG_SLOW_MS";
+const ENV_TYPE_ALIASES: &str = "HIRUST_MAPPER_TYPE_ALIASES";
+
+fn config_err(msg: impl Into<String>) -> MapperRuntimeError {
+    MapperRuntimeError::Config(msg.into())
+}
+
+fn parse_u32(v: &str, var: &str) -> Result<u32> {
+    v.trim().parse::<u32>().map_err(|_| {
+        config_err(format!("环境变量 {} 期望 u32，实际 '{}'", var, v))
+    })
+}
+
+fn parse_u64(v: &str, var: &str) -> Result<u64> {
+    v.trim().parse::<u64>().map_err(|_| {
+        config_err(format!("环境变量 {} 期望 u64，实际 '{}'", var, v))
+    })
+}
+
+/// 解析布尔：true/1/yes/on → true；false/0/no/off → false（大小写不敏感）
+fn parse_bool(v: &str, var: &str) -> Result<bool> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => Err(config_err(format!(
+            "环境变量 {} 期望布尔（true/false/1/0/yes/no），实际 '{}'",
+            var, v
+        ))),
+    }
+}
+
+/// 解析类型别名：`int=i32,long=i64` → [(int, i32), (long, i64)]
+fn parse_aliases(v: &str) -> Result<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    for pair in v.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let (k, t) = pair.split_once('=').ok_or_else(|| {
+            config_err(format!(
+                "环境变量 {} 期望 'name=type' 形式（逗号分隔），无效项 '{}'",
+                ENV_TYPE_ALIASES, pair
+            ))
+        })?;
+        out.push((k.trim().to_string(), t.trim().to_string()));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -343,5 +557,197 @@ url = "sqlite::memory:""#,
             .with_sql_log_slow_threshold_ms(50);
         assert!(config.settings.sql_log);
         assert_eq!(config.settings.sql_log_slow_threshold_ms, 50);
+    }
+
+    // ─── 粒度 setter 测试 ──────────────────────────────────────────
+
+    #[test]
+    fn test_granular_environment_setters() {
+        let config = HirustMapperConfig::new()
+            .with_driver("postgres")
+            .with_url("postgres://localhost/db")
+            .with_pool_max_connections(42)
+            .with_pool_min_connections(7);
+        assert_eq!(config.environment.driver, "postgres");
+        assert_eq!(config.environment.url, "postgres://localhost/db");
+        assert_eq!(config.environment.pool_max_connections, 42);
+        assert_eq!(config.environment.pool_min_connections, 7);
+    }
+
+    #[test]
+    fn test_granular_setter_does_not_reset_others() {
+        // with_driver 只改 driver，保留其他字段
+        let config = HirustMapperConfig::new()
+            .with_environment(EnvironmentConfig {
+                driver: "mysql".into(),
+                url: "mysql://x".into(),
+                pool_max_connections: 30,
+                pool_min_connections: 5,
+            })
+            .with_driver("postgres");
+        assert_eq!(config.environment.driver, "postgres");
+        assert_eq!(config.environment.url, "mysql://x"); // 未被重置
+        assert_eq!(config.environment.pool_max_connections, 30);
+    }
+
+    #[test]
+    fn test_type_alias_setters() {
+        let config = HirustMapperConfig::new()
+            .with_type_alias("int", "i32")
+            .with_type_alias("long", "i64");
+        assert_eq!(config.type_aliases.get("int"), Some(&"i32".to_string()));
+        assert_eq!(config.type_aliases.get("long"), Some(&"i64".to_string()));
+
+        // 整体替换
+        let mut map = HashMap::new();
+        map.insert("dec".to_string(), "f64".to_string());
+        let config = config.with_type_aliases(map);
+        assert_eq!(config.type_aliases.len(), 1);
+        assert!(config.type_aliases.get("int").is_none());
+        assert_eq!(config.type_aliases.get("dec"), Some(&"f64".to_string()));
+    }
+
+    // ─── env 覆盖测试（用 TestEnv，避免 std::env 并行竞态）─────────
+
+    /// 测试用 env 源：基于 HashMap
+    #[derive(Default)]
+    struct TestEnv(HashMap<&'static str, String>);
+    impl TestEnv {
+        fn set(mut self, k: &'static str, v: impl Into<String>) -> Self {
+            self.0.insert(k, v.into());
+            self
+        }
+    }
+    impl EnvSource for TestEnv {
+        fn get(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+    }
+
+    #[test]
+    fn test_env_override_all_fields() {
+        let env = TestEnv::default()
+            .set(ENV_DRIVER, "postgres")
+            .set(ENV_URL, "postgres://h/db")
+            .set(ENV_POOL_MAX, "88")
+            .set(ENV_POOL_MIN, "8")
+            .set(ENV_PATHS, "a/*.xml, b/**/*.xml")
+            .set(ENV_REFRESH_MS, "1234")
+            .set(ENV_SQL_LOG, "true")
+            .set(ENV_SQL_LOG_SLOW_MS, "200")
+            .set(ENV_TYPE_ALIASES, "int=i32, long=i64");
+
+        let mut config = HirustMapperConfig::new();
+        config.apply_env_overrides_from(&env).unwrap();
+
+        assert_eq!(config.environment.driver, "postgres");
+        assert_eq!(config.environment.url, "postgres://h/db");
+        assert_eq!(config.environment.pool_max_connections, 88);
+        assert_eq!(config.environment.pool_min_connections, 8);
+        assert_eq!(config.settings.mapper_paths, vec!["a/*.xml", "b/**/*.xml"]);
+        assert_eq!(config.settings.mapper_refresh_interval_ms, 1234);
+        assert!(config.settings.sql_log);
+        assert_eq!(config.settings.sql_log_slow_threshold_ms, 200);
+        assert_eq!(config.type_aliases.get("int"), Some(&"i32".to_string()));
+        assert_eq!(config.type_aliases.get("long"), Some(&"i64".to_string()));
+    }
+
+    #[test]
+    fn test_env_override_priority_env_wins() {
+        // 编程/TOML 设的值被 env 覆盖
+        let env = TestEnv::default().set(ENV_URL, "env-url");
+        let config = HirustMapperConfig::new()
+            .with_url("programmatic-url")
+            .with_env_overrides_from(&env)
+            .unwrap();
+        assert_eq!(config.environment.url, "env-url"); // env 胜
+    }
+
+    #[test]
+    fn test_env_override_absent_keeps_programmatic() {
+        // env 未设 → 保留编程/TOML 值
+        let env = TestEnv::default(); // 空
+        let config = HirustMapperConfig::new()
+            .with_driver("mysql")
+            .with_url("kept-url")
+            .with_pool_max_connections(15)
+            .with_env_overrides_from(&env)
+            .unwrap();
+        assert_eq!(config.environment.driver, "mysql");
+        assert_eq!(config.environment.url, "kept-url");
+        assert_eq!(config.environment.pool_max_connections, 15);
+    }
+
+    #[test]
+    fn test_database_url_alias() {
+        // HIRUST_MAPPER_URL 优先于 DATABASE_URL
+        let env = TestEnv::default()
+            .set(ENV_DATABASE_URL, "db-url-alias")
+            .set(ENV_URL, "explicit-url");
+        let mut config = HirustMapperConfig::new();
+        config.apply_env_overrides_from(&env).unwrap();
+        assert_eq!(config.environment.url, "explicit-url");
+
+        // 仅 DATABASE_URL 时生效
+        let env = TestEnv::default().set(ENV_DATABASE_URL, "db-url-alias");
+        let mut config = HirustMapperConfig::new().with_url("orig");
+        config.apply_env_overrides_from(&env).unwrap();
+        assert_eq!(config.environment.url, "db-url-alias");
+    }
+
+    #[test]
+    fn test_env_bool_variants() {
+        for (raw, expected) in [
+            ("true", true), ("1", true), ("YES", true), ("on", true),
+            ("false", false), ("0", false), ("No", false), ("off", false),
+        ] {
+            let env = TestEnv::default().set(ENV_SQL_LOG, raw);
+            let mut config = HirustMapperConfig::new();
+            config.apply_env_overrides_from(&env).unwrap();
+            assert_eq!(config.settings.sql_log, expected, "raw={}", raw);
+        }
+    }
+
+    #[test]
+    fn test_env_invalid_bool_errors() {
+        let env = TestEnv::default().set(ENV_SQL_LOG, "maybe");
+        let mut config = HirustMapperConfig::new();
+        let err = config.apply_env_overrides_from(&env).unwrap_err();
+        assert!(err.to_string().contains("HIRUST_MAPPER_SQL_LOG"));
+    }
+
+    #[test]
+    fn test_env_invalid_number_errors() {
+        let env = TestEnv::default().set(ENV_POOL_MAX, "not-a-number");
+        let mut config = HirustMapperConfig::new();
+        let err = config.apply_env_overrides_from(&env).unwrap_err();
+        assert!(err.to_string().contains("HIRUST_MAPPER_POOL_MAX"));
+    }
+
+    #[test]
+    fn test_env_type_aliases_merges() {
+        // env 别名合并入已存在的 map
+        let env = TestEnv::default().set(ENV_TYPE_ALIASES, "new=NEW");
+        let config = HirustMapperConfig::new()
+            .with_type_alias("old", "OLD")
+            .with_env_overrides_from(&env)
+            .unwrap();
+        assert_eq!(config.type_aliases.get("old"), Some(&"OLD".to_string()));
+        assert_eq!(config.type_aliases.get("new"), Some(&"NEW".to_string()));
+    }
+
+    #[test]
+    fn test_env_paths_trims_and_filters_empty() {
+        let env = TestEnv::default().set(ENV_PATHS, " a.xml , , b.xml ,");
+        let mut config = HirustMapperConfig::new();
+        config.apply_env_overrides_from(&env).unwrap();
+        assert_eq!(config.settings.mapper_paths, vec!["a.xml", "b.xml"]);
+    }
+
+    #[test]
+    fn test_env_invalid_alias_format_errors() {
+        let env = TestEnv::default().set(ENV_TYPE_ALIASES, "noequals");
+        let mut config = HirustMapperConfig::new();
+        assert!(config.apply_env_overrides_from(&env).is_err());
     }
 }
