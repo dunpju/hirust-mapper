@@ -122,10 +122,9 @@ impl ResultSetHandler {
     /// 将一行反序列化为目标类型 `T`
     pub fn map_row<T: DeserializeOwned>(row: &AnyRow) -> Result<T> {
         let value = Self::row_to_value(row)?;
-        serde_json::from_value(value.clone()).map_err(|e| {
-            MapperRuntimeError::TypeConversion(format!(
-                "反序列化行失败: {}（行数据: {}）", e, value
-            ))
+        // 直接 move value（成功路径零克隆）；错误信息不附带完整行数据以避免每行克隆
+        serde_json::from_value::<T>(value).map_err(|e| {
+            MapperRuntimeError::TypeConversion(format!("反序列化行失败: {}", e))
         })
     }
 
@@ -156,22 +155,30 @@ impl ResultSetHandler {
     // ─── ResultMap 嵌套映射（P8）──────────────────────────────────
 
     /// 按列名读取单格值（列不存在返回 Null）
-    fn column_value_by_name(row: &AnyRow, name: &str) -> Result<Value> {
-        for (idx, col) in row.columns().iter().enumerate() {
-            if col.name() == name {
-                return Self::column_to_value(row, idx, None);
-            }
+    ///
+    /// 通过预构建的 `col_index`（列名→列序号）做 O(1) 查找，避免每格线性扫描。
+    fn column_value_by_name(
+        row: &AnyRow,
+        name: &str,
+        col_index: &HashMap<&str, usize>,
+    ) -> Result<Value> {
+        match col_index.get(name) {
+            Some(&idx) => Self::column_to_value(row, idx, None),
+            None => Ok(Value::Null),
         }
-        Ok(Value::Null)
     }
 
     /// 构建嵌套对象（association / collection 子项共用）。
     /// 若所有结果列为 null，返回 `Value::Null`（表示无关联对象）。
-    fn build_nested_object(row: &AnyRow, mapping: &NestedMapping) -> Result<Value> {
+    fn build_nested_object(
+        row: &AnyRow,
+        mapping: &NestedMapping,
+        col_index: &HashMap<&str, usize>,
+    ) -> Result<Value> {
         let mut obj = serde_json::Map::new();
         let mut any_non_null = false;
         for col in &mapping.result_columns {
-            let v = Self::column_value_by_name(row, &col.column)?;
+            let v = Self::column_value_by_name(row, &col.column, col_index)?;
             if !v.is_null() {
                 any_non_null = true;
             }
@@ -185,24 +192,28 @@ impl ResultSetHandler {
     }
 
     /// 构建单个父对象（含顶层列 + association + collection 首元素）
-    fn build_parent_object(row: &AnyRow, result_map: &ResultMap) -> Result<Value> {
+    fn build_parent_object(
+        row: &AnyRow,
+        result_map: &ResultMap,
+        col_index: &HashMap<&str, usize>,
+    ) -> Result<Value> {
         let mut obj = serde_json::Map::new();
 
         // 顶层 id/result 列
         for col in &result_map.result_columns {
-            let v = Self::column_value_by_name(row, &col.column)?;
+            let v = Self::column_value_by_name(row, &col.column, col_index)?;
             obj.insert(col.property.clone(), v);
         }
 
         // association（一对一）：列为空则 Null
         for assoc in &result_map.associations {
-            let nested = Self::build_nested_object(row, assoc)?;
+            let nested = Self::build_nested_object(row, assoc, col_index)?;
             obj.insert(assoc.property.clone(), nested);
         }
 
         // collection（一对多）：首行放入数组，后续行追加
         for coll in &result_map.collections {
-            let child = Self::build_nested_object(row, coll)?;
+            let child = Self::build_nested_object(row, coll, col_index)?;
             if child.is_null() {
                 obj.insert(coll.property.clone(), Value::Array(Vec::new()));
             } else {
@@ -214,13 +225,18 @@ impl ResultSetHandler {
     }
 
     /// 父对象的分组键（由 id 列的值拼接；无 id 列时使用行序号）
-    fn parent_key(row: &AnyRow, id_cols: &[String], row_idx: usize) -> Result<String> {
+    fn parent_key(
+        row: &AnyRow,
+        id_cols: &[String],
+        row_idx: usize,
+        col_index: &HashMap<&str, usize>,
+    ) -> Result<String> {
         if id_cols.is_empty() {
             return Ok(format!("__row_{}", row_idx));
         }
         let mut parts = Vec::with_capacity(id_cols.len());
         for c in id_cols {
-            let v = Self::column_value_by_name(row, c)?;
+            let v = Self::column_value_by_name(row, c, col_index)?;
             parts.push(v.to_string());
         }
         Ok(parts.join("\u{1F}")) // 单元分隔符，避免值内逗号冲突
@@ -235,6 +251,20 @@ impl ResultSetHandler {
         rows: Vec<AnyRow>,
         result_map: &ResultMap,
     ) -> Result<Vec<T>> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 一次性建立列名→列序号索引（列序在结果集内稳定），后续按 O(1) 查找，
+        // 取代每格线性扫描（原 O(行数 × 映射列数 × 行总列数) → 现 O(行数 × 映射列数)）。
+        // 索引的 &str 键借用 rows[0] 的列名，rows 在整个函数期内存活，借用有效。
+        let col_index: HashMap<&str, usize> = rows[0]
+            .columns()
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.name(), i))
+            .collect();
+
         let id_cols: Vec<String> = result_map
             .result_columns
             .iter()
@@ -246,11 +276,11 @@ impl ResultSetHandler {
         let mut key_index: HashMap<String, usize> = HashMap::new();
 
         for (row_idx, row) in rows.iter().enumerate() {
-            let key = Self::parent_key(row, &id_cols, row_idx)?;
+            let key = Self::parent_key(row, &id_cols, row_idx, &col_index)?;
             if let Some(&idx) = key_index.get(&key) {
                 // 已存在父：仅追加 collection 子项
                 for coll in &result_map.collections {
-                    let child = Self::build_nested_object(row, coll)?;
+                    let child = Self::build_nested_object(row, coll, &col_index)?;
                     if child.is_null() {
                         continue;
                     }
@@ -264,7 +294,7 @@ impl ResultSetHandler {
                 }
             } else {
                 key_index.insert(key, parents.len());
-                parents.push(Self::build_parent_object(row, result_map)?);
+                parents.push(Self::build_parent_object(row, result_map, &col_index)?);
             }
         }
 

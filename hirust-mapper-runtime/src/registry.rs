@@ -12,7 +12,7 @@ use crate::error::MapperRuntimeError;
 /// 使用 `RwLock` 允许查询路径的并发读，以及热重载时的独占写。
 #[derive(Debug, Default, Clone)]
 pub struct MapperRegistry {
-    inner: Arc<RwLock<HashMap<String, Mapper>>>,
+    inner: Arc<RwLock<HashMap<String, Arc<Mapper>>>>,
 }
 
 impl MapperRegistry {
@@ -67,13 +67,17 @@ impl MapperRegistry {
     }
 
     /// 插入（或替换）一个已解析的 Mapper，返回旧的 Mapper（若存在）
-    pub fn insert_mapper(&self, mapper: Mapper) -> Option<Mapper> {
+    pub fn insert_mapper(&self, mapper: Mapper) -> Option<Arc<Mapper>> {
         let mut guard = self.inner.write().expect("MapperRegistry 锁中毒");
-        guard.insert(mapper.namespace.clone(), mapper)
+        let namespace = mapper.namespace.clone();
+        guard.insert(namespace, Arc::new(mapper))
     }
 
-    /// 按 namespace 查找 Mapper 的克隆（避免长时间持锁）
-    pub fn get_mapper(&self, namespace: &str) -> Option<Mapper> {
+    /// 按 namespace 查找 Mapper，返回廉价的 `Arc<Mapper>`（避免深克隆与长时间持锁）
+    ///
+    /// 仅做一次原子引用计数自增，不复制 Mapper 内部的 statements / result_maps /
+    /// sql_fragments。调用方通过 `Deref` 即可访问内部字段。
+    pub fn get_mapper(&self, namespace: &str) -> Option<Arc<Mapper>> {
         let guard = self.inner.read().expect("MapperRegistry 锁中毒");
         guard.get(namespace).cloned()
     }

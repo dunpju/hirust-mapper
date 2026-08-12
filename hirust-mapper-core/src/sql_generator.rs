@@ -1,6 +1,7 @@
 use super::model::DynamicSqlNode;
 use super::model::MapperError;
 use std::collections::HashMap;
+use std::sync::RwLock;
 use serde_json::Value;
 use crate::Mapper;
 use regex::Regex;
@@ -10,6 +11,11 @@ lazy_static! {
     static ref PARAM_REGEX: Regex = Regex::new(r#"#\{([^}]*)\}"#).unwrap();
     static ref DOLLAR_PARAM_REGEX: Regex = Regex::new(r#"\$\{([^}]*)\}"#).unwrap();
     static ref CONDITION_REGEX: Regex = Regex::new(r"^\s*([\w\.\(\)]+)\s*([!=<>]+)\s*(.+?)\s*$").unwrap();
+    /// <if>/<when> 的 test 表达式预编译缓存（test 文本 → 解析结果）。
+    ///
+    /// test 文本来自静态 XML，集合有限且稳定，故用全局缓存按需解析一次后复用，
+    /// 避免每次查询对同一表达式重复 regex 解析与 String 分配。读多写少，读路径并发。
+    static ref CONDITION_CACHE: RwLock<HashMap<String, Vec<ConditionGroup>>> = RwLock::new(HashMap::new());
 }
 
 // ─── 参数访问 trait ───────────────────────────────────────────────
@@ -31,10 +37,10 @@ pub trait ParamsAccess {
 impl ParamsAccess for HashMap<String, Value> {
     fn get_param(&self, key: &str) -> Option<&Value> {
         if key.contains('.') {
-            let parts: Vec<&str> = key.split('.').collect();
-            let mut current = self.get(parts[0])?;
-            for part in &parts[1..] {
-                current = current.get(*part)?;
+            let mut iter = key.split('.');
+            let mut current = self.get(iter.next()?)?;
+            for part in iter {
+                current = current.get(part)?;
             }
             Some(current)
         } else {
@@ -57,7 +63,7 @@ impl ParamsAccess for HashMap<String, Value> {
 
 // ─── 条件表达式求值 ──────────────────────────────────────────────
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct KeyValue {
     key: String,
     condition: String,
@@ -65,6 +71,7 @@ struct KeyValue {
 }
 
 /// 条件组：一组由 and 连接的条件，多个组之间用 or 连接
+#[derive(Clone)]
 struct ConditionGroup {
     conditions: Vec<KeyValue>,
 }
@@ -205,12 +212,28 @@ fn evaluate_single(kv: &KeyValue, params: &impl ParamsAccess) -> bool {
     }
 }
 
-fn evaluate_condition(condition: &str, params: &impl ParamsAccess) -> bool {
-    let groups = ConditionGroup::parse(condition).unwrap_or_default();
-    // 组间 or，组内 and
+/// 对已解析的条件组求值（组间 or，组内 and）
+fn eval_groups(groups: &[ConditionGroup], params: &impl ParamsAccess) -> bool {
     groups.iter().any(|group| {
         group.conditions.iter().all(|kv| evaluate_single(kv, params))
     })
+}
+
+fn evaluate_condition(condition: &str, params: &impl ParamsAccess) -> bool {
+    // 快路径：缓存命中（读锁，并发友好）
+    {
+        let cache = CONDITION_CACHE.read().unwrap();
+        if let Some(groups) = cache.get(condition) {
+            return eval_groups(groups, params);
+        }
+    }
+    // 慢路径：首次解析（失败回退空 → 恒 false，保持旧行为）并写入缓存。
+    // 并发 miss 至多重复解析一次（or_insert 幂等），无害。
+    let groups = ConditionGroup::parse(condition).unwrap_or_default();
+    if let Ok(mut cache) = CONDITION_CACHE.write() {
+        cache.entry(condition.to_string()).or_insert(groups.clone());
+    }
+    eval_groups(&groups, params)
 }
 
 // ─── 辅助函数 ─────────────────────────────────────────────────────
@@ -219,47 +242,57 @@ fn get_parent_params<P: ParamsAccess>(params: &P) -> HashMap<String, Value> {
     params.as_hash_map().cloned().unwrap_or_default()
 }
 
-/// 创建foreach迭代时的临时参数上下文（继承父参数 + 注入 item/index）
-fn create_temp_params(
-    item: &str, item_value: &Value,
-    index: &Option<String>, index_value: usize,
-    parent_params: &HashMap<String, Value>,
-) -> HashMap<String, Value> {
-    let mut temp = parent_params.clone();
-    temp.insert(item.to_string(), item_value.clone());
-    if let Some(idx_name) = index {
-        temp.insert(idx_name.clone(), Value::Number(index_value.into()));
+/// 将任意空白（含 `\n` `\r` 连续空格）归一化为单词间单个空格，无中间 `Vec`
+fn collapse_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut first = true;
+    for w in s.split_whitespace() {
+        if !first {
+            out.push(' ');
+        }
+        out.push_str(w);
+        first = false;
     }
-    temp
+    out
 }
 
 /// 将节点序列拼接为SQL，支持bind变量注入
 fn join_with_spaces<P: ParamsAccess>(nodes: &[DynamicSqlNode], params: &P, mapper: &Mapper) -> Result<String, MapperError> {
-    let mut parts = Vec::new();
-    let mut enriched = get_parent_params(params);
+    let mut raw = String::new();
+    // 仅在遇到 <bind> 时才克隆父参数表（绝大多数语句无 bind，零克隆）
+    let mut enriched: Option<HashMap<String, Value>> = None;
 
     for n in nodes {
         match n {
             DynamicSqlNode::Bind { name, value } => {
-                let resolved = replace_parameters(value, &enriched)?;
-                enriched.insert(name.clone(), Value::String(resolved));
+                let map = enriched.get_or_insert_with(|| get_parent_params(params));
+                let resolved = replace_parameters(value, map)?;
+                map.insert(name.clone(), Value::String(resolved));
             },
             _ => {
-                let sql = generate_sql(n, &enriched, mapper)?;
+                let sql = match &enriched {
+                    Some(map) => generate_sql(n, map, mapper)?,
+                    None => generate_sql(n, params, mapper)?,
+                };
                 if !sql.trim().is_empty() {
-                    parts.push(sql.replace('\n', " ").replace('\r', ""));
+                    if !raw.is_empty() {
+                        raw.push(' ');
+                    }
+                    raw.push_str(&sql);
                 }
             },
         }
     }
 
-    let result = parts.join(" ");
-    // 合并连续空白
-    Ok(result.split_whitespace().collect::<Vec<&str>>().join(" "))
+    Ok(collapse_whitespace(&raw))
 }
 
 /// 替换 #{...} 和 ${...} 占位符
 fn replace_parameters(content: &str, params: &impl ParamsAccess) -> Result<String, MapperError> {
+    // 短路：无占位符的字面文本直接返回，跳过双趟 regex 与分配
+    if !content.contains("#{") && !content.contains("${") {
+        return Ok(content.to_string());
+    }
     // 先处理 ${...} — 原样替换，不加引号
     let with_dollar = DOLLAR_PARAM_REGEX.replace_all(content, |caps: &regex::Captures| {
         let path = &caps[1];
@@ -294,22 +327,24 @@ fn replace_parameters(content: &str, params: &impl ParamsAccess) -> Result<Strin
 }
 
 /// 去除SQL前缀/后缀的公共逻辑
-fn strip_overrides(sql: &str, overrides: Option<&str>, default: Option<&str>, strip_prefix: bool) -> String {
+///
+/// 取得 `sql` 的所有权：未命中任何 override 时原样返回（零分配），命中时才重组。
+fn strip_overrides(sql: String, overrides: Option<&str>, default: Option<&str>, strip_prefix: bool) -> String {
     let effective = overrides.or(default).unwrap_or("");
-    let mut result = sql.to_string();
-
-    for part in effective.split('|').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        if strip_prefix && result.starts_with(part) {
-            result = result[part.len()..].trim_start().to_string();
-            break;
-        }
-        if !strip_prefix && result.ends_with(part) {
-            result = result[..result.len() - part.len()].trim_end().to_string();
-            break;
-        }
+    if effective.is_empty() {
+        return sql;
     }
 
-    result
+    for part in effective.split('|').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if strip_prefix {
+            if let Some(rest) = sql.strip_prefix(part) {
+                return rest.trim_start().to_string();
+            }
+        } else if let Some(rest) = sql.strip_suffix(part) {
+            return rest.trim_end().to_string();
+        }
+    }
+    sql
 }
 
 // ─── 核心 SQL 生成 ────────────────────────────────────────────────
@@ -339,14 +374,19 @@ pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P, mapper: 
                 _ => return Ok(String::new()),
             };
 
-            let parent = get_parent_params(params);
-            let mut result = open.clone();
+            // 克隆一次父参数表，循环内仅覆盖 item/index（避免每元素全表克隆）
+            let mut temp = get_parent_params(params);
+            let mut result = String::with_capacity(open.len() + close.len());
+            result.push_str(open);
 
             for (i, item_val) in items.iter().enumerate() {
                 if i > 0 {
                     result.push_str(separator);
                 }
-                let temp = create_temp_params(item, item_val, index, i, &parent);
+                temp.insert(item.clone(), item_val.clone());
+                if let Some(idx_name) = index {
+                    temp.insert(idx_name.clone(), Value::Number(i.into()));
+                }
                 result.push_str(&join_with_spaces(contents, &temp, mapper)?);
             }
 
@@ -356,8 +396,8 @@ pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P, mapper: 
 
         DynamicSqlNode::Trim { prefix, prefix_overrides, suffix, suffix_overrides, contents } => {
             let mut sql = join_with_spaces(contents, params, mapper)?;
-            sql = strip_overrides(&sql, prefix_overrides.as_deref(), None, true);
-            sql = strip_overrides(&sql, suffix_overrides.as_deref(), None, false);
+            sql = strip_overrides(sql,prefix_overrides.as_deref(), None, true);
+            sql = strip_overrides(sql,suffix_overrides.as_deref(), None, false);
 
             if let Some(p) = prefix {
                 if !sql.is_empty() && !p.trim_end().is_empty() {
@@ -400,18 +440,24 @@ pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P, mapper: 
                     .ok_or_else(|| MapperError::MissingFragment { ref_id: ref_id.clone() })?
             };
 
-            let parts: Vec<String> = fragment.iter()
-                .map(|node| generate_sql(node, params, mapper))
-                .filter(|s| s.as_ref().map(|sql| !sql.trim().is_empty()).unwrap_or(false))
-                .collect::<Result<Vec<_>, _>>()?;
-
-            Ok(parts.join(" "))
+            let mut result = String::new();
+            for node in fragment.iter() {
+                let sql = generate_sql(node, params, mapper)?;
+                if sql.trim().is_empty() {
+                    continue;
+                }
+                if !result.is_empty() {
+                    result.push(' ');
+                }
+                result.push_str(&sql);
+            }
+            Ok(result)
         },
 
         DynamicSqlNode::Where { prefix_overrides, suffix_overrides, contents } => {
             let sql = join_with_spaces(contents, params, mapper)?;
-            let sql = strip_overrides(&sql, prefix_overrides.as_deref(), Some("AND |OR "), true);
-            let sql = strip_overrides(&sql, suffix_overrides.as_deref(), None, false);
+            let sql = strip_overrides(sql,prefix_overrides.as_deref(), Some("AND |OR "), true);
+            let sql = strip_overrides(sql,suffix_overrides.as_deref(), None, false);
 
             if sql.is_empty() {
                 Ok(String::new())
@@ -422,8 +468,8 @@ pub fn generate_sql<P: ParamsAccess>(node: &DynamicSqlNode, params: &P, mapper: 
 
         DynamicSqlNode::Set { prefix_overrides, suffix_overrides, contents } => {
             let sql = join_with_spaces(contents, params, mapper)?;
-            let sql = strip_overrides(&sql, prefix_overrides.as_deref(), None, true);
-            let sql = strip_overrides(&sql, suffix_overrides.as_deref(), Some(","), false);
+            let sql = strip_overrides(sql,prefix_overrides.as_deref(), None, true);
+            let sql = strip_overrides(sql,suffix_overrides.as_deref(), Some(","), false);
 
             if sql.is_empty() {
                 Ok(String::new())
@@ -522,6 +568,10 @@ impl BoundSql {
 /// 这是 [`replace_parameters`] 的「绑定版本」：`#{}` 不再内联值，
 /// 而是输出 `?` 并将值收集到 [`BoundSql::parameters`]。
 fn replace_parameters_bound(content: &str, params: &impl ParamsAccess) -> Result<BoundSql, MapperError> {
+    // 短路：无占位符的字面文本直接返回（零参数）
+    if !content.contains("#{") && !content.contains("${") {
+        return Ok(BoundSql::new(content.to_string()));
+    }
     // 先处理 ${...} — 原样内联（无法参数化）
     let with_dollar = DOLLAR_PARAM_REGEX.replace_all(content, |caps: &regex::Captures| {
         let path = &caps[1];
@@ -559,18 +609,22 @@ fn join_with_spaces_bound<P: ParamsAccess>(
     params: &P,
     mapper: &Mapper,
 ) -> Result<BoundSql, MapperError> {
-    let mut enriched = get_parent_params(params);
     let mut result = BoundSql::new(String::new());
+    // 仅在遇到 <bind> 时才克隆父参数表
+    let mut enriched: Option<HashMap<String, Value>> = None;
 
     for n in nodes {
         match n {
             DynamicSqlNode::Bind { name, value } => {
-                // bind 变量：解析其 value 表达式（内联模式即可，结果作为字符串注入）
-                let resolved = replace_parameters(value, &enriched)?;
-                enriched.insert(name.clone(), Value::String(resolved));
+                let map = enriched.get_or_insert_with(|| get_parent_params(params));
+                let resolved = replace_parameters(value, map)?;
+                map.insert(name.clone(), Value::String(resolved));
             },
             _ => {
-                let child = generate_bound_sql(n, &enriched, mapper)?;
+                let child = match &enriched {
+                    Some(map) => generate_bound_sql(n, map, mapper)?,
+                    None => generate_bound_sql(n, params, mapper)?,
+                };
                 if !child.sql.trim().is_empty() {
                     if !result.sql.is_empty() {
                         result.sql.push(' ');
@@ -583,7 +637,7 @@ fn join_with_spaces_bound<P: ParamsAccess>(
     }
 
     // 合并连续空白（不影响 ? 与参数的对应关系）
-    result.sql = result.sql.split_whitespace().collect::<Vec<&str>>().join(" ");
+    result.sql = collapse_whitespace(&result.sql);
     Ok(result)
 }
 
@@ -624,14 +678,18 @@ pub fn generate_bound_sql<P: ParamsAccess>(
                 _ => return Ok(BoundSql::new(String::new())),
             };
 
-            let parent = get_parent_params(params);
+            // 克隆一次父参数表，循环内仅覆盖 item/index（避免每元素全表克隆）
+            let mut temp = get_parent_params(params);
             let mut result = BoundSql::new(open.clone());
 
             for (i, item_val) in items.iter().enumerate() {
                 if i > 0 {
                     result.sql.push_str(separator);
                 }
-                let temp = create_temp_params(item, item_val, index, i, &parent);
+                temp.insert(item.clone(), item_val.clone());
+                if let Some(idx_name) = index {
+                    temp.insert(idx_name.clone(), Value::Number(i.into()));
+                }
                 let child = join_with_spaces_bound(contents, &temp, mapper)?;
                 result.sql.push_str(&child.sql);
                 result.parameters.extend(child.parameters);
@@ -643,8 +701,8 @@ pub fn generate_bound_sql<P: ParamsAccess>(
 
         DynamicSqlNode::Trim { prefix, prefix_overrides, suffix, suffix_overrides, contents } => {
             let mut bound = join_with_spaces_bound(contents, params, mapper)?;
-            bound.sql = strip_overrides(&bound.sql, prefix_overrides.as_deref(), None, true);
-            bound.sql = strip_overrides(&bound.sql, suffix_overrides.as_deref(), None, false);
+            bound.sql = strip_overrides(bound.sql, prefix_overrides.as_deref(), None, true);
+            bound.sql = strip_overrides(bound.sql, suffix_overrides.as_deref(), None, false);
 
             if let Some(p) = prefix {
                 if !bound.sql.is_empty() && !p.trim_end().is_empty() {
@@ -703,8 +761,8 @@ pub fn generate_bound_sql<P: ParamsAccess>(
 
         DynamicSqlNode::Where { prefix_overrides, suffix_overrides, contents } => {
             let mut bound = join_with_spaces_bound(contents, params, mapper)?;
-            bound.sql = strip_overrides(&bound.sql, prefix_overrides.as_deref(), Some("AND |OR "), true);
-            bound.sql = strip_overrides(&bound.sql, suffix_overrides.as_deref(), None, false);
+            bound.sql = strip_overrides(bound.sql, prefix_overrides.as_deref(), Some("AND |OR "), true);
+            bound.sql = strip_overrides(bound.sql, suffix_overrides.as_deref(), None, false);
 
             if bound.sql.is_empty() {
                 Ok(bound)
@@ -716,8 +774,8 @@ pub fn generate_bound_sql<P: ParamsAccess>(
 
         DynamicSqlNode::Set { prefix_overrides, suffix_overrides, contents } => {
             let mut bound = join_with_spaces_bound(contents, params, mapper)?;
-            bound.sql = strip_overrides(&bound.sql, prefix_overrides.as_deref(), None, true);
-            bound.sql = strip_overrides(&bound.sql, suffix_overrides.as_deref(), Some(","), false);
+            bound.sql = strip_overrides(bound.sql, prefix_overrides.as_deref(), None, true);
+            bound.sql = strip_overrides(bound.sql, suffix_overrides.as_deref(), Some(","), false);
 
             if bound.sql.is_empty() {
                 Ok(bound)

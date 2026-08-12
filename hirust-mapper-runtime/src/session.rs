@@ -104,8 +104,8 @@ impl SqlSession {
 
     // ─── Mapper 查找与 SQL 生成 ────────────────────────────────────
 
-    /// 按 namespace 查找 Mapper（克隆）
-    pub fn get_mapper(&self, namespace: &str) -> Result<Mapper> {
+    /// 按 namespace 查找 Mapper（返回廉价的 `Arc<Mapper>`，不深克隆）
+    pub fn get_mapper(&self, namespace: &str) -> Result<Arc<Mapper>> {
         self.mapper_registry()
             .get_mapper(namespace)
             .ok_or_else(|| MapperRuntimeError::MapperNotFound(namespace.to_string()))
@@ -221,7 +221,7 @@ impl SqlSession {
         let params = Self::params_to_map(params)?;
         let bound = self.build_bound_sql(namespace, statement_id, &params)?;
         let args = crate::handler::parameter::ParameterHandler::bind_arguments(&bound)?;
-        let driver = self.environment.driver().to_string();
+        let driver = self.environment.driver();
 
         if let Some(tx) = self.transaction.as_mut() {
             let conn: &mut sqlx::AnyConnection = tx; // deref coercion: &mut Transaction → &mut AnyConnection
@@ -229,7 +229,7 @@ impl SqlSession {
                 .execute(&mut *conn)
                 .await
                 .map_err(MapperRuntimeError::Database)?;
-            Ok(Self::fetch_last_insert_id(conn, &driver).await?)
+            Ok(Self::fetch_last_insert_id(conn, driver).await?)
         } else {
             let mut conn = self
                 .environment
@@ -241,7 +241,7 @@ impl SqlSession {
                 .execute(&mut *conn)
                 .await
                 .map_err(MapperRuntimeError::Database)?;
-            Ok(Self::fetch_last_insert_id(&mut conn, &driver).await?)
+            Ok(Self::fetch_last_insert_id(&mut conn, driver).await?)
         }
     }
 
