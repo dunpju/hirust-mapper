@@ -12,6 +12,7 @@ use crate::environment::Environment;
 use crate::error::Result;
 use crate::hot_reload::{extract_watch_dirs, MapperWatcher};
 use crate::registry::{MapperRegistry, TypeAliasRegistry};
+use crate::sql_log::SqlLogConfig;
 use crate::type_handler::TypeHandlerRegistry;
 
 pub use crate::session::{MapperProxy, SqlSession};
@@ -33,6 +34,7 @@ pub struct SqlSessionFactory {
     mapper_registry: Arc<RwLock<MapperRegistry>>,
     type_alias_registry: Arc<TypeAliasRegistry>,
     type_handler_registry: Arc<TypeHandlerRegistry>,
+    sql_log: Arc<SqlLogConfig>,
     config: HirustMapperConfig,
     base_dir: std::path::PathBuf,
     /// 热重载监视器（None 表示未启用热重载）
@@ -78,6 +80,12 @@ impl SqlSessionFactory {
         let type_alias_registry = Arc::new(TypeAliasRegistry::from_map(config.type_aliases.clone()));
         let type_handler_registry = Arc::new(TypeHandlerRegistry::with_defaults());
 
+        // SQL 执行日志配置（从 settings 解析，默认关闭）
+        let sql_log = Arc::new(SqlLogConfig {
+            enabled: config.settings.sql_log,
+            slow_threshold_ms: config.settings.sql_log_slow_threshold_ms,
+        });
+
         // 4. 热重载（当 refresh_interval > 0 时启动）
         let watcher = if config.settings.mapper_refresh_interval_ms > 0 {
             let watch_dirs = extract_watch_dirs(&config.settings.mapper_paths, &base_dir);
@@ -109,6 +117,7 @@ impl SqlSessionFactory {
             mapper_registry,
             type_alias_registry,
             type_handler_registry,
+            sql_log,
             config,
             base_dir,
             watcher,
@@ -124,11 +133,16 @@ impl SqlSessionFactory {
         config: HirustMapperConfig,
         base_dir: std::path::PathBuf,
     ) -> Self {
+        let sql_log = Arc::new(SqlLogConfig {
+            enabled: config.settings.sql_log,
+            slow_threshold_ms: config.settings.sql_log_slow_threshold_ms,
+        });
         Self {
             environment,
             mapper_registry: Arc::new(RwLock::new(mapper_registry)),
             type_alias_registry: Arc::new(type_alias_registry),
             type_handler_registry: Arc::new(type_handler_registry),
+            sql_log,
             config,
             base_dir,
             watcher: None,
@@ -192,6 +206,7 @@ impl SqlSessionFactory {
             Arc::clone(&self.mapper_registry),
             Arc::clone(&self.type_alias_registry),
             Arc::clone(&self.type_handler_registry),
+            Arc::clone(&self.sql_log),
         )
     }
 

@@ -13,6 +13,7 @@ pub mod handler;
 pub mod hot_reload;
 pub mod registry;
 pub mod session;
+pub mod sql_log;
 pub mod session_factory;
 pub mod type_handler;
 
@@ -25,6 +26,7 @@ pub use handler::{ParameterHandler, ResultSetHandler};
 pub use hot_reload::MapperWatcher;
 pub use registry::*;
 pub use session::{MapperProxy, SqlSession};
+pub use sql_log::SqlLogConfig;
 pub use session_factory::SqlSessionFactory;
 pub use type_handler::{
     BoolHandler, F64Handler, I32Handler, I64Handler, StringHandler, TypeHandler,

@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use futures_util::StreamExt;
 use hirust_mapper_core::{BoundSql, Mapper, ResultMap};
@@ -23,6 +24,7 @@ use crate::environment::Environment;
 use crate::error::{MapperRuntimeError, Result};
 use crate::executor::SimpleExecutor;
 use crate::registry::{MapperRegistry, TypeAliasRegistry};
+use crate::sql_log::SqlLogConfig;
 use crate::type_handler::TypeHandlerRegistry;
 
 /// SqlSession（请求级）
@@ -31,6 +33,7 @@ pub struct SqlSession {
     mapper_registry: Arc<RwLock<MapperRegistry>>,
     type_alias_registry: Arc<TypeAliasRegistry>,
     type_handler_registry: Arc<TypeHandlerRegistry>,
+    sql_log: Arc<SqlLogConfig>,
     executor: SimpleExecutor,
     transaction: Option<sqlx::Transaction<'static, sqlx::Any>>,
     closed: bool,
@@ -53,13 +56,16 @@ impl SqlSession {
         mapper_registry: Arc<RwLock<MapperRegistry>>,
         type_alias_registry: Arc<TypeAliasRegistry>,
         type_handler_registry: Arc<TypeHandlerRegistry>,
+        sql_log: Arc<SqlLogConfig>,
     ) -> Self {
-        let executor = SimpleExecutor::new(Arc::clone(&type_handler_registry));
+        let executor = SimpleExecutor::new(Arc::clone(&type_handler_registry))
+            .with_sql_log(Arc::clone(&sql_log));
         Self {
             environment,
             mapper_registry,
             type_alias_registry,
             type_handler_registry,
+            sql_log,
             executor,
             transaction: None,
             closed: false,
@@ -255,12 +261,14 @@ impl SqlSession {
         let args = crate::handler::parameter::ParameterHandler::bind_arguments(&bound)?;
         let driver = self.environment.driver();
 
+        let start = Instant::now();
         if let Some(tx) = self.transaction.as_mut() {
             let conn: &mut sqlx::AnyConnection = tx; // deref coercion: &mut Transaction → &mut AnyConnection
             sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
                 .execute(&mut *conn)
                 .await
                 .map_err(MapperRuntimeError::Database)?;
+            crate::sql_log::log_execution(&self.sql_log, &bound, start.elapsed());
             Ok(Self::fetch_last_insert_id(conn, driver).await?)
         } else {
             let mut conn = self
@@ -273,6 +281,7 @@ impl SqlSession {
                 .execute(&mut *conn)
                 .await
                 .map_err(MapperRuntimeError::Database)?;
+            crate::sql_log::log_execution(&self.sql_log, &bound, start.elapsed());
             Ok(Self::fetch_last_insert_id(&mut conn, driver).await?)
         }
     }

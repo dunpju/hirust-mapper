@@ -6,6 +6,7 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures_util::{Stream, StreamExt};
 use hirust_mapper_core::BoundSql;
@@ -16,24 +17,35 @@ use sqlx::Executor;
 use crate::error::Result;
 use crate::handler::parameter::ParameterHandler;
 use crate::handler::result_set::ResultSetHandler;
+use crate::sql_log::SqlLogConfig;
 use crate::type_handler::TypeHandlerRegistry;
 
 /// 基础执行器
 ///
-/// 无状态（除类型处理器注册表），可被多个 Session 共享。
+/// 无状态（除类型处理器注册表与 SQL 日志配置），可被多个 Session 共享。
 pub struct SimpleExecutor {
     type_handler_registry: Arc<TypeHandlerRegistry>,
+    sql_log: Arc<SqlLogConfig>,
 }
 
 impl SimpleExecutor {
     /// 使用指定类型处理器注册表创建
     pub fn new(type_handler_registry: Arc<TypeHandlerRegistry>) -> Self {
-        Self { type_handler_registry }
+        Self {
+            type_handler_registry,
+            sql_log: Arc::new(SqlLogConfig::default()),
+        }
     }
 
     /// 使用默认内置类型处理器创建
     pub fn with_defaults() -> Self {
         Self::new(Arc::new(TypeHandlerRegistry::with_defaults()))
+    }
+
+    /// 设置 SQL 日志配置（开启执行日志 / 慢查询阈值）
+    pub fn with_sql_log(mut self, sql_log: Arc<SqlLogConfig>) -> Self {
+        self.sql_log = sql_log;
+        self
     }
 
     /// 类型处理器注册表
@@ -47,10 +59,13 @@ impl SimpleExecutor {
         E: Executor<'q, Database = sqlx::Any>,
     {
         let args = ParameterHandler::bind_arguments(bound)?;
-        sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
+        let start = Instant::now();
+        let result = sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
             .fetch_all(executor)
             .await
-            .map_err(Into::into)
+            .map_err(Into::into);
+        crate::sql_log::log_execution(&self.sql_log, bound, start.elapsed());
+        result
     }
 
     /// 流式查询：返回逐行的行流（按需拉取，避免 [`query_rows`](Self::query_rows) 的 `fetch_all`
@@ -132,10 +147,13 @@ impl SimpleExecutor {
         E: Executor<'q, Database = sqlx::Any>,
     {
         let args = ParameterHandler::bind_arguments(bound)?;
-        sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
+        let start = Instant::now();
+        let result = sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
             .execute(executor)
             .await
-            .map_err(Into::into)
+            .map_err(Into::into);
+        crate::sql_log::log_execution(&self.sql_log, bound, start.elapsed());
+        result
     }
 }
 

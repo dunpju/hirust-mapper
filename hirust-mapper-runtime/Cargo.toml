@@ -16,6 +16,7 @@ sqlx = { workspace = true, features = ["runtime-tokio", "any"] }
 tokio = { workspace = true }
 notify = { workspace = true }
 futures-util = "=0.3.32"
+log = { version = "0.4", features = ["std"] }
 
 # 可选类型处理器依赖
 chrono = { workspace = true, optional = true }

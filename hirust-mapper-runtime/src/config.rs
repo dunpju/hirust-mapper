@@ -65,6 +65,13 @@ pub struct SettingsConfig {
     /// 热重载轮询间隔（毫秒），0 表示禁用
     #[serde(default)]
     pub mapper_refresh_interval_ms: u64,
+    /// 是否开启 SQL 执行日志（耗时 + 可读 SQL，经 `log` facade 输出，默认关闭）。
+    /// 需应用初始化日志后端（如 env_logger / tracing_subscriber）方能见到输出。
+    #[serde(default)]
+    pub sql_log: bool,
+    /// 慢查询阈值（毫秒）；仅记录耗时 ≥ 此值的 SQL。`0` 表示记录全部执行的 SQL。
+    #[serde(default)]
+    pub sql_log_slow_threshold_ms: u64,
 }
 
 fn default_mapper_paths() -> Vec<String> {
@@ -76,6 +83,8 @@ impl Default for SettingsConfig {
         Self {
             mapper_paths: default_mapper_paths(),
             mapper_refresh_interval_ms: 0,
+            sql_log: false,
+            sql_log_slow_threshold_ms: 0,
         }
     }
 }
@@ -127,6 +136,21 @@ impl HirustMapperConfig {
     /// 启用热重载
     pub fn with_hot_reload(mut self, interval_ms: u64) -> Self {
         self.settings.mapper_refresh_interval_ms = interval_ms;
+        self
+    }
+
+    /// 开启 SQL 执行日志（耗时 + 可读 SQL）。
+    ///
+    /// 等价于 toml `[settings] sql_log = true`。阈值可用
+    /// [`with_sql_log_slow_threshold_ms`](Self::with_sql_log_slow_threshold_ms) 设置。
+    pub fn with_sql_log(mut self, enabled: bool) -> Self {
+        self.settings.sql_log = enabled;
+        self
+    }
+
+    /// 设置慢查询日志阈值（毫秒）：仅记录耗时 ≥ 此值的 SQL。`0` 表示记录全部。
+    pub fn with_sql_log_slow_threshold_ms(mut self, threshold_ms: u64) -> Self {
+        self.settings.sql_log_slow_threshold_ms = threshold_ms;
         self
     }
 
@@ -278,5 +302,46 @@ handler = "myapp::MoneyHandler"
         assert_eq!(config.environment.driver, "sqlite");
         assert_eq!(config.settings.mapper_paths, vec!["sql/**/*.xml"]);
         assert_eq!(config.settings.mapper_refresh_interval_ms, 1000);
+    }
+
+    #[test]
+    fn test_parse_sql_log_settings() {
+        let toml_str = r#"
+[environment]
+driver = "sqlite"
+url = "sqlite::memory:"
+
+[settings]
+sql_log = true
+sql_log_slow_threshold_ms = 100
+"#;
+        let config = HirustMapperConfig::parse_toml(toml_str).unwrap();
+        assert!(config.settings.sql_log);
+        assert_eq!(config.settings.sql_log_slow_threshold_ms, 100);
+
+        // 默认（缺省字段）应为关闭、阈值 0
+        let minimal = HirustMapperConfig::parse_toml(
+            r#"[environment]
+driver = "sqlite"
+url = "sqlite::memory:""#,
+        )
+        .unwrap();
+        assert!(!minimal.settings.sql_log);
+        assert_eq!(minimal.settings.sql_log_slow_threshold_ms, 0);
+    }
+
+    #[test]
+    fn test_sql_log_builder() {
+        let config = HirustMapperConfig::new()
+            .with_environment(EnvironmentConfig {
+                driver: "sqlite".into(),
+                url: "sqlite::memory:".into(),
+                pool_max_connections: 5,
+                pool_min_connections: 1,
+            })
+            .with_sql_log(true)
+            .with_sql_log_slow_threshold_ms(50);
+        assert!(config.settings.sql_log);
+        assert_eq!(config.settings.sql_log_slow_threshold_ms, 50);
     }
 }

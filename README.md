@@ -8,6 +8,7 @@
 - **两阶段 SQL** — `build_sql`（内联）与 `build_bound_sql`（参数化 `?` + 参数列表，防注入）并行提供
 - **异步执行层** — 基于 sqlx，内置连接池、事务（begin/commit/rollback）、SimpleExecutor
 - **流式查询** — `select_for_each`（回调式）与 `query_stream` / `query_rows_stream`（sqlx fetch 流），大结果集低内存峰值
+- **SQL 执行日志** — `[settings] sql_log` 开关控制，输出「耗时 + 参数内联的可读 SQL」，经 `log` facade 输出，支持慢查询阈值
 - **类型处理** — TypeHandler 体系（i32/i64/f64/bool/String + feature-gated chrono/uuid），`serde_json::Value` 通用中间表示
 - **ResultMap 嵌套映射** — `<association>` 一对一、`<collection>` 一对多分组、`<id>` 身份、`<selectKey>` 主键回填
 - **条件增强** — 支持 `.size()` / `.isEmpty()` 方法调用与布尔字面量
@@ -175,11 +176,37 @@ pool_min_connections = 2
 [settings]
 mapper_paths = ["mappers/**/*.xml"]
 mapper_refresh_interval_ms = 3000      # 热重载间隔，0 = 禁用
+sql_log = true                         # SQL 执行日志开关（默认 false）
+sql_log_slow_threshold_ms = 0          # 慢查询阈值(ms)：仅记录耗时≥此值的 SQL；0 = 全部
 
 [type_aliases]
 "int" = "i32"
 "long" = "i64"
 ```
+
+## SQL 执行日志
+
+在 `[settings]` 中设置 `sql_log = true`（或编程式 `.with_sql_log(true)`），即可对每次 SQL 执行输出「耗时 + 参数内联的可读 SQL」：
+
+```text
+[2026-08-12 15:32:03 INFO hirust_mapper::sql] Consume Time: 44 ms
+ Execute SQL: SELECT `examId`,`examName` FROM exam WHERE (`examId` IN (69902) AND `isDelete` = 0)
+```
+
+- 日志 target 固定为 `hirust_mapper::sql`，参数按 `?` 顺序内联（字符串加引号、`NULL`/布尔/数字原样）。
+- `sql_log_slow_threshold_ms > 0` 时只记录达到阈值的慢查询；`0` 记录全部。
+- 本 crate **只经 `log` facade 发射日志，不自带输出后端**——需应用初始化一个日志后端方能见到输出：
+
+```rust
+// 方式一：env_logger
+env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+// 精确过滤：RUST_LOG=hirust_mapper::sql=info
+
+// 方式二：tracing（sqlx 也用 tracing，可统一）
+tracing_subscriber::fmt().with_env_filter("hirust_mapper::sql=info").init();
+```
+
+`log` facade 在无后端时为零开销；关闭 `sql_log` 时执行点不做任何格式化与计时之外的工作。
 
 ## 示例
 
@@ -204,7 +231,7 @@ cargo run --example proc_macro_usage --features full       # 编译时 DAO 生�
 ## 测试
 
 ```sh
-cargo test --workspace     # 106 个测试（core 41 + runtime 39 + 集成 20（含流式 4）+ macros 6）
+cargo test --workspace     # 115 个测试（core 41 + runtime 46 + 集成 22（含流式 4、SQL 日志 2）+ macros 6）
 ```
 
 ## License
