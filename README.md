@@ -7,6 +7,7 @@
 - **完整动态 SQL** — `<if>` / `<choose>` / `<foreach>` / `<where>` / `<set>` / `<trim>` / `<bind>` / `<include>` / `<sql>`
 - **两阶段 SQL** — `build_sql`（内联）与 `build_bound_sql`（参数化 `?` + 参数列表，防注入）并行提供
 - **异步执行层** — 基于 sqlx，内置连接池、事务（begin/commit/rollback）、SimpleExecutor
+- **流式查询** — `select_for_each`（回调式）与 `query_stream` / `query_rows_stream`（sqlx fetch 流），大结果集低内存峰值
 - **类型处理** — TypeHandler 体系（i32/i64/f64/bool/String + feature-gated chrono/uuid），`serde_json::Value` 通用中间表示
 - **ResultMap 嵌套映射** — `<association>` 一对一、`<collection>` 一对多分组、`<id>` 身份、`<selectKey>` 主键回填
 - **条件增强** — 支持 `.size()` / `.isEmpty()` 方法调用与布尔字面量
@@ -67,6 +68,39 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 ```
+
+### 流式查询（大结果集）
+
+对于大结果集，用流式接口逐行拉取，避免 `select_list` 一次性物化整表（`fetch_all`）导致的内存峰值：
+
+```rust
+use std::collections::HashMap;
+use futures_util::StreamExt;
+
+// 方式一：session 级回调式（自动选 pool / 事务，内部构建 BoundSql）
+session
+    .select_for_each("app.UserDao", "findAll", &HashMap::new(), |u: &User| {
+        println!("{u:?}"); // 逐行处理；返回 Err 可提前终止
+        Ok(())
+    })
+    .await?;
+
+// 方式二：executor 级 Stream（调用方持有 BoundSql，可组合、可异步逐行处理）
+let bound = session.build_bound_sql("app.UserDao", "findAll", &HashMap::new())?;
+let mut stream = session
+    .executor()
+    .query_stream::<_, User>(&bound, session.pool());
+while let Some(user) = stream.next().await {
+    let user = user?;
+    // ...
+}
+```
+
+> 方式二消费 Stream 需在 `Cargo.toml` 添加 `futures-util = "0.3"`；方式一（`select_for_each`）无需额外依赖。
+
+- 流式仅支持普通列映射（`AnyRow → T`），**不支持 ResultMap 嵌套分组**（分组需聚集全部行，与流式语义冲突）。
+- 回调返回 `Err` 会向上传递并终止流；空结果集不触发回调。
+- `select_one` / `select_list` / `fetch_all` 行为不变（含 `TooManyRows` 校验）。
 
 ### Proc Macro API（编译时类型安全）
 
@@ -165,12 +199,12 @@ cargo run --example proc_macro_usage --features full       # 编译时 DAO 生�
 | `hirust-mapper-macros` | `#[hirust_mapper]` / `#[derive(MapperModel)]` 编译时层 |
 | `hirust-mapper` | 门面 crate，feature gate 聚合 |
 
-依赖：[sqlx](https://crates.io/crates/sqlx) 0.8（执行层）、[quick-xml](https://crates.io/crates/quick-xml) 0.38（解析）、[notify](https://crates.io/crates/notify) 7（热重载）、[tokio](https://crates.io/crates/tokio) 1（异步运行时）。
+依赖：[sqlx](https://crates.io/crates/sqlx) 0.9（执行层）、[quick-xml](https://crates.io/crates/quick-xml) 0.41（解析）、[notify](https://crates.io/crates/notify) 8（热重载）、[futures-util](https://crates.io/crates/futures-util) 0.3（流式查询）、[tokio](https://crates.io/crates/tokio) 1（异步运行时）。
 
 ## 测试
 
 ```sh
-cargo test --workspace     # 102 个测试（core 41 + runtime 39 + 集成 16 + macros 6）
+cargo test --workspace     # 106 个测试（core 41 + runtime 39 + 集成 20（含流式 4）+ macros 6）
 ```
 
 ## License

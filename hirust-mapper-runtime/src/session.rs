@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use futures_util::StreamExt;
 use hirust_mapper_core::{BoundSql, Mapper, ResultMap};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -202,6 +203,37 @@ impl SqlSession {
             Some(rm) => crate::handler::result_set::ResultSetHandler::map_rows_with_result_map::<T>(rows, &rm),
             None => crate::handler::result_set::ResultSetHandler::map_rows::<T>(rows),
         }
+    }
+
+    /// 流式查询：逐行拉取并经回调处理，避免 [`select_list`](Self::select_list) 一次性物化整表，
+    /// 适合大结果集的低内存峰值场景。
+    ///
+    /// 仅支持普通列映射（`AnyRow → T`），**不支持 ResultMap 嵌套分组**
+    ///（分组需聚集全部行，与流式语义冲突）。回调返回 `Err` 可提前终止并向上传递。
+    pub async fn select_for_each<T, F>(
+        &mut self,
+        namespace: &str,
+        statement_id: &str,
+        params: &HashMap<String, Value>,
+        mut f: F,
+    ) -> Result<()>
+    where
+        T: DeserializeOwned + Send,
+        F: FnMut(&T) -> Result<()>,
+    {
+        let bound = self.build_bound_sql(namespace, statement_id, params)?;
+        let executor = &self.executor;
+        // 流借用 bound（局部）与执行器；bound 在本函数内活过整个循环，借用有效。
+        let mut stream = match self.transaction.as_mut() {
+            Some(tx) => executor.query_rows_stream(&bound, &mut **tx),
+            None => executor.query_rows_stream(&bound, self.environment.pool()),
+        };
+        while let Some(row_res) = stream.next().await {
+            let row = row_res?;
+            let item = crate::handler::result_set::ResultSetHandler::map_row::<T>(&row)?;
+            f(&item)?;
+        }
+        Ok(())
     }
 
     // ─── 写入接口 ──────────────────────────────────────────────────

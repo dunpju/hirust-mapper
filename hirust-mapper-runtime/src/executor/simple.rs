@@ -4,8 +4,10 @@
 //! 所有方法以泛型 `E: sqlx::Executor` 接收执行目标，因此同一套逻辑可作用于
 //! 连接池（`&AnyPool`）或事务连接（`&mut AnyConnection`）。
 
+use std::pin::Pin;
 use std::sync::Arc;
 
+use futures_util::{Stream, StreamExt};
 use hirust_mapper_core::BoundSql;
 use serde::de::DeserializeOwned;
 use sqlx::any::{AnyQueryResult, AnyRow};
@@ -49,6 +51,50 @@ impl SimpleExecutor {
             .fetch_all(executor)
             .await
             .map_err(Into::into)
+    }
+
+    /// 流式查询：返回逐行的行流（按需拉取，避免 [`query_rows`](Self::query_rows) 的 `fetch_all`
+    /// 一次性物化整表）。适用于大结果集、低内存峰值场景。
+    ///
+    /// 流借用调用方提供的 `bound` 与 `executor`。调用方配合 `futures_util::StreamExt` 消费：
+    /// ```ignore
+    /// use futures_util::StreamExt;
+    /// let mut stream = executor.query_rows_stream(&bound, &pool);
+    /// while let Some(row) = stream.next().await {
+    ///     let row = row?;
+    ///     // ...
+    /// }
+    /// ```
+    pub fn query_rows_stream<'q, E>(
+        &self,
+        bound: &'q BoundSql,
+        executor: E,
+    ) -> Pin<Box<dyn Stream<Item = Result<AnyRow>> + Send + 'q>>
+    where
+        E: Executor<'q, Database = sqlx::Any> + Send + 'q,
+    {
+        let args = match ParameterHandler::bind_arguments(bound) {
+            Ok(a) => a,
+            Err(e) => return Box::pin(futures_util::stream::once(async move { Err(e) })),
+        };
+        let s = sqlx::query_with(sqlx::AssertSqlSafe(&*bound.sql), args)
+            .fetch(executor)
+            .map(|res| res.map_err(crate::error::MapperRuntimeError::from));
+        Box::pin(s)
+    }
+
+    /// 流式查询并逐行映射为 `T`（[`query`](Self::query) 的流式版本）
+    pub fn query_stream<'q, E, T>(
+        &self,
+        bound: &'q BoundSql,
+        executor: E,
+    ) -> Pin<Box<dyn Stream<Item = Result<T>> + Send + 'q>>
+    where
+        E: Executor<'q, Database = sqlx::Any> + Send + 'q,
+        T: DeserializeOwned + Send + 'q,
+    {
+        let row_stream = self.query_rows_stream(bound, executor);
+        Box::pin(row_stream.map(|r| r.and_then(|row| ResultSetHandler::map_row::<T>(&row))))
     }
 
     /// 执行查询，将每行映射为 `T`
