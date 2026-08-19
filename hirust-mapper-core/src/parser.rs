@@ -31,6 +31,48 @@ fn bytes_to_str(bytes: &[u8]) -> Result<String, MapperError> {
     Ok(std::str::from_utf8(bytes)?.to_string())
 }
 
+/// 解析 XML 实体引用名（gt/lt/amp/quot/apos 与十进制/十六进制字符引用）为字符；
+/// 未定义实体原样保留（&name;），避免信息丢失。
+fn resolve_entity(name: &str) -> String {
+    match name {
+        "lt" => "<".to_string(),
+        "gt" => ">".to_string(),
+        "amp" => "&".to_string(),
+        "quot" => "\"".to_string(),
+        "apos" => "'".to_string(),
+        other => {
+            if let Some(hex) = other.strip_prefix("#x").or_else(|| other.strip_prefix("#X")) {
+                if let Some(c) = u32::from_str_radix(hex, 16).ok().and_then(char::from_u32) {
+                    return c.to_string();
+                }
+            } else if let Some(dec) = other.strip_prefix('#') {
+                if let Some(c) = dec.parse::<u32>().ok().and_then(char::from_u32) {
+                    return c.to_string();
+                }
+            }
+            format!("&{other};")
+        }
+    }
+}
+
+/// 合并向量中相邻的 Text 节点（原样拼接，不加分隔符）。
+/// 实体引用拆分产生的相邻 Text 片段自带原始空白，合并不会粘连单词。
+fn merge_adjacent_text_nodes(nodes: &mut Vec<DynamicSqlNode>) {
+    let mut merged: Vec<DynamicSqlNode> = Vec::with_capacity(nodes.len());
+    for node in nodes.drain(..) {
+        if let DynamicSqlNode::Text(text) = node {
+            if let Some(DynamicSqlNode::Text(prev)) = merged.last_mut() {
+                prev.push_str(&text);
+                continue;
+            }
+            merged.push(DynamicSqlNode::Text(text));
+        } else {
+            merged.push(node);
+        }
+    }
+    *nodes = merged;
+}
+
 impl MyBatisXmlParser {
     /// 从字符串创建解析器
     pub fn new(xml_content: &str) -> Self {
@@ -170,6 +212,19 @@ impl MyBatisXmlParser {
                         dynamic_nodes.push(DynamicSqlNode::Text(text));
                     }
                 },
+                Ok(Event::GeneralRef(ref e)) => {
+                    // quick-xml ≥0.37 将实体引用（&gt; &lt; &amp; &#62; …）拆为独立事件返回，
+                    // 若丢弃会导致 SQL 中的比较符等凭空消失（实测引发 MySQL 1064 或静默语义错误）。
+                    // 解析实体为字符后并入当前 SQL 文本。
+                    let name = bytes_to_str(e)?;
+                    let resolved = resolve_entity(&name);
+                    sql_buffer.push_str(&resolved);
+                    if let Some(DynamicSqlNode::Text(prev)) = dynamic_nodes.last_mut() {
+                        prev.push_str(&resolved);
+                    } else {
+                        dynamic_nodes.push(DynamicSqlNode::Text(resolved));
+                    }
+                },
                 Ok(Event::CData(t)) => {
                     let text = bytes_to_str(&t)?;
                     sql_buffer.push_str(&text);
@@ -183,6 +238,10 @@ impl MyBatisXmlParser {
                 _ => {}
             }
         }
+
+        // 合并相邻 Text 节点：实体引用会把一段文本拆成多个事件（Text/GeneralRef/Text），
+        // 若不合并，join_with_spaces 会在节点间插入空格（如 &gt;= 被拼成 "> =" 导致 SQL 语法错误）
+        merge_adjacent_text_nodes(dynamic_nodes);
 
         Ok(())
     }
