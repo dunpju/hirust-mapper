@@ -159,7 +159,8 @@ fn evaluate_single(kv: &KeyValue, params: &impl ParamsAccess) -> bool {
             match kv.condition.as_str() {
                 "=" | "==" => {
                     if kv.value == "null" {
-                        return false;
+                        // 参数存在且为 JSON null 时，"key == null" 才为 true（对齐 MyBatis OGNL）
+                        return value.is_null();
                     } else if let Some(b) = value_bool {
                         matches!(value, Value::Bool(x) if x == b)
                     } else if kv.value.starts_with('\'') && kv.value.ends_with('\'') {
@@ -173,7 +174,8 @@ fn evaluate_single(kv: &KeyValue, params: &impl ParamsAccess) -> bool {
                 },
                 "!=" => {
                     if kv.value == "null" {
-                        return true;
+                        // 参数存在且为 JSON null 时，"key != null" 应为 false（对齐 MyBatis OGNL）
+                        return !value.is_null();
                     } else if let Some(b) = value_bool {
                         matches!(value, Value::Bool(x) if x != b)
                     } else if kv.value.starts_with('\'') && kv.value.ends_with('\'') {
