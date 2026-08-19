@@ -339,8 +339,16 @@ impl SqlSession {
                     .map_err(MapperRuntimeError::Database)?;
                 Ok(Some(id))
             }
+            "mysql" => {
+                // LAST_INSERT_ID() 为连接级语义，与 insert 显式持有的同一连接匹配
+                let id: i64 = sqlx::query_scalar("SELECT LAST_INSERT_ID()")
+                    .fetch_one(conn)
+                    .await
+                    .map_err(MapperRuntimeError::Database)?;
+                Ok(Some(id))
+            }
             _ => {
-                // mysql/postgres 等的生成主键获取留待 P8（selectKey / RETURNING）
+                // postgres 等的生成主键获取留待 P8（RETURNING）
                 Ok(None)
             }
         }
