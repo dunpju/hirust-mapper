@@ -5,7 +5,7 @@
 //! 通过 `build()` 从配置构建，通过 `open_session()` 创建请求级的 [`SqlSession`]。
 
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use crate::config::HirustMapperConfig;
 use crate::environment::Environment;
@@ -32,7 +32,8 @@ pub use crate::session::{MapperProxy, SqlSession};
 /// ```
 pub struct SqlSessionFactory {
     environment: Environment,
-    mapper_registry: Arc<RwLock<MapperRegistry>>,
+    /// Mapper 注册表（内部自带 RwLock，无需外层再包一层锁）
+    mapper_registry: Arc<MapperRegistry>,
     type_alias_registry: Arc<TypeAliasRegistry>,
     type_handler_registry: Arc<TypeHandlerRegistry>,
     sql_log: Arc<SqlLogConfig>,
@@ -76,7 +77,7 @@ impl SqlSessionFactory {
         // 2. 初始化并加载 Mapper 注册表
         let mapper_registry = MapperRegistry::new();
         let _namespaces = mapper_registry.load_from_config(&config, &base_dir)?;
-        let mapper_registry = Arc::new(RwLock::new(mapper_registry));
+        let mapper_registry = Arc::new(mapper_registry);
 
         // 3. 初始化类型别名 / 类型处理器注册表
         let type_alias_registry = Arc::new(TypeAliasRegistry::from_map(config.type_aliases.clone()));
@@ -94,7 +95,8 @@ impl SqlSessionFactory {
         // 4. 热重载（当 refresh_interval > 0 时启动）
         let watcher = if config.settings.mapper_refresh_interval_ms > 0 {
             let watch_dirs = extract_watch_dirs(&config.settings.mapper_paths, &base_dir);
-            let registry_clone = mapper_registry.read().expect("MapperRegistry 锁中毒").clone();
+            // 克隆 MapperRegistry（内部共享同一 Arc<RwLock<..>>，热重载替换对工厂可见）
+            let registry_clone: MapperRegistry = (*mapper_registry).clone();
             match MapperWatcher::start(
                 registry_clone,
                 watch_dirs,
@@ -145,7 +147,7 @@ impl SqlSessionFactory {
         });
         Self {
             environment,
-            mapper_registry: Arc::new(RwLock::new(mapper_registry)),
+            mapper_registry: Arc::new(mapper_registry),
             type_alias_registry: Arc::new(type_alias_registry),
             type_handler_registry: Arc::new(type_handler_registry),
             sql_log,
@@ -166,14 +168,9 @@ impl SqlSessionFactory {
         &self.environment
     }
 
-    /// Mapper 注册表的只读锁
-    pub fn mapper_registry(&self) -> std::sync::RwLockReadGuard<'_, MapperRegistry> {
-        self.mapper_registry.read().expect("MapperRegistry 锁中毒")
-    }
-
-    /// Mapper 注册表的可写锁（热重载用）
-    pub fn mapper_registry_mut(&self) -> std::sync::RwLockWriteGuard<'_, MapperRegistry> {
-        self.mapper_registry.write().expect("MapperRegistry 锁中毒")
+    /// Mapper 注册表引用（内部自带线程安全，写操作如 insert_mapper 也经 &self）
+    pub fn mapper_registry(&self) -> &MapperRegistry {
+        &self.mapper_registry
     }
 
     /// 类型别名注册表引用

@@ -175,7 +175,7 @@ impl ResultSetHandler {
         mapping: &NestedMapping,
         col_index: &HashMap<&str, usize>,
     ) -> Result<Value> {
-        let mut obj = serde_json::Map::new();
+        let mut obj = serde_json::Map::with_capacity(mapping.result_columns.len());
         let mut any_non_null = false;
         for col in &mapping.result_columns {
             let v = Self::column_value_by_name(row, &col.column, col_index)?;
@@ -191,17 +191,33 @@ impl ResultSetHandler {
         }
     }
 
-    /// 构建单个父对象（含顶层列 + association + collection 首元素）
+    /// 构建单个父对象（含顶层列 + association + collection 首元素）。
+    ///
+    /// `id_values` 为调用方已解码的 `<id>` 列值（按 result_columns 中 is_id 出现顺序），
+    /// 传入后避免重复解码；为空或耗尽时回退为按列名解码（供单行路径复用）。
     fn build_parent_object(
         row: &AnyRow,
         result_map: &ResultMap,
         col_index: &HashMap<&str, usize>,
+        id_values: Vec<Value>,
     ) -> Result<Value> {
-        let mut obj = serde_json::Map::new();
+        let mut obj = serde_json::Map::with_capacity(
+            result_map.result_columns.len()
+                + result_map.associations.len()
+                + result_map.collections.len(),
+        );
+        let mut id_iter = id_values.into_iter();
 
-        // 顶层 id/result 列
+        // 顶层 id/result 列（id 列复用预解码值）
         for col in &result_map.result_columns {
-            let v = Self::column_value_by_name(row, &col.column, col_index)?;
+            let v = if col.is_id {
+                match id_iter.next() {
+                    Some(v) => v,
+                    None => Self::column_value_by_name(row, &col.column, col_index)?,
+                }
+            } else {
+                Self::column_value_by_name(row, &col.column, col_index)?
+            };
             obj.insert(col.property.clone(), v);
         }
 
@@ -224,22 +240,13 @@ impl ResultSetHandler {
         Ok(Value::Object(obj))
     }
 
-    /// 父对象的分组键（由 id 列的值拼接；无 id 列时使用行序号）
-    fn parent_key(
-        row: &AnyRow,
-        id_cols: &[String],
-        row_idx: usize,
-        col_index: &HashMap<&str, usize>,
-    ) -> Result<String> {
-        if id_cols.is_empty() {
-            return Ok(format!("__row_{}", row_idx));
-        }
-        let mut parts = Vec::with_capacity(id_cols.len());
-        for c in id_cols {
-            let v = Self::column_value_by_name(row, c, col_index)?;
-            parts.push(v.to_string());
-        }
-        Ok(parts.join("\u{1F}")) // 单元分隔符，避免值内逗号冲突
+    /// 一次性建立列名→列序号索引（列序在结果集内稳定），后续按 O(1) 查找
+    fn col_index_of(row: &AnyRow) -> HashMap<&str, usize> {
+        row.columns()
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.name(), i))
+            .collect()
     }
 
     /// 使用 ResultMap 将多行映射为 `Vec<T>`（支持 association 一对一 + collection 一对多分组）
@@ -255,28 +262,40 @@ impl ResultSetHandler {
             return Ok(Vec::new());
         }
 
-        // 一次性建立列名→列序号索引（列序在结果集内稳定），后续按 O(1) 查找，
-        // 取代每格线性扫描（原 O(行数 × 映射列数 × 行总列数) → 现 O(行数 × 映射列数)）。
+        // 一次性建立列名→列序号索引（列序在结果集内稳定），后续按 O(1) 查找。
         // 索引的 &str 键借用 rows[0] 的列名，rows 在整个函数期内存活，借用有效。
-        let col_index: HashMap<&str, usize> = rows[0]
-            .columns()
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (c.name(), i))
-            .collect();
+        let col_index = Self::col_index_of(&rows[0]);
 
-        let id_cols: Vec<String> = result_map
+        let id_cols: Vec<&str> = result_map
             .result_columns
             .iter()
             .filter(|c| c.is_id)
-            .map(|c| c.column.clone())
+            .map(|c| c.column.as_str())
             .collect();
 
-        let mut parents: Vec<Value> = Vec::new();
-        let mut key_index: HashMap<String, usize> = HashMap::new();
+        // 上界 = 行数（每行至多产生一个父对象）
+        let mut parents: Vec<Value> = Vec::with_capacity(rows.len());
+        let mut key_index: HashMap<String, usize> = HashMap::with_capacity(rows.len());
 
         for (row_idx, row) in rows.iter().enumerate() {
-            let key = Self::parent_key(row, &id_cols, row_idx, &col_index)?;
+            // id 列每行只解码一次：分组键与父对象构建共用，避免双重解码
+            let id_values: Vec<Value> = id_cols
+                .iter()
+                .map(|c| Self::column_value_by_name(row, c, &col_index))
+                .collect::<Result<_>>()?;
+            let key = if id_cols.is_empty() {
+                format!("__row_{}", row_idx)
+            } else if id_values.len() == 1 {
+                id_values[0].to_string() // 常见单 id 列：免 Vec/join
+            } else {
+                // 单元分隔符拼接，避免值内逗号冲突
+                id_values
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\u{1F}")
+            };
+
             if let Some(&idx) = key_index.get(&key) {
                 // 已存在父：仅追加 collection 子项
                 for coll in &result_map.collections {
@@ -294,7 +313,7 @@ impl ResultSetHandler {
                 }
             } else {
                 key_index.insert(key, parents.len());
-                parents.push(Self::build_parent_object(row, result_map, &col_index)?);
+                parents.push(Self::build_parent_object(row, result_map, &col_index, id_values)?);
             }
         }
 
@@ -309,6 +328,8 @@ impl ResultSetHandler {
     }
 
     /// 使用 ResultMap 映射单行（`select_one` 路径；多于一行报错）
+    ///
+    /// 单行无需分组：直接构建父对象（跳过分组键/索引搭建成本）。
     pub fn map_row_with_result_map<T: DeserializeOwned>(
         rows: Vec<AnyRow>,
         result_map: &ResultMap,
@@ -316,8 +337,13 @@ impl ResultSetHandler {
         match rows.len() {
             0 => Ok(None),
             1 => {
-                let mut mapped = Self::map_rows_with_result_map::<T>(rows, result_map)?;
-                Ok(mapped.pop())
+                let row = &rows[0];
+                let col_index = Self::col_index_of(row);
+                let value = Self::build_parent_object(row, result_map, &col_index, Vec::new())?;
+                let t = serde_json::from_value::<T>(value).map_err(|e| {
+                    MapperRuntimeError::TypeConversion(format!("ResultMap 反序列化失败: {}", e))
+                })?;
+                Ok(Some(t))
             }
             n => Err(MapperRuntimeError::TooManyRows { actual: n }),
         }

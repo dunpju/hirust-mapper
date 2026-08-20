@@ -116,37 +116,58 @@ impl ConditionGroup {
     }
 }
 
+/// 条件求值中的参数解析结果。
+///
+/// 普通参数键返回 [`ResolvedParam::Borrowed`]（零克隆）；仅 `.size()`/`.isEmpty()`
+/// 这类需要构造新值的后缀返回 [`ResolvedParam::Owned`]（小值，栈外仅一次小分配）。
+enum ResolvedParam<'a> {
+    Borrowed(&'a Value),
+    Owned(Value),
+}
+
+impl ResolvedParam<'_> {
+    fn as_value(&self) -> &Value {
+        match self {
+            ResolvedParam::Borrowed(v) => v,
+            ResolvedParam::Owned(v) => v,
+        }
+    }
+}
+
 /// 解析参数键的值，支持 `.size()` / `.isEmpty()` 方法调用
 ///
 /// - `key.size()` → 集合/字符串/对象的长度（Number）；缺失或 null → 0
 /// - `key.isEmpty()` → 是否为空（Bool）；缺失或 null → true
-/// - 其他 → 原始参数值
-fn resolve_param(key: &str, params: &impl ParamsAccess) -> Option<Value> {
+/// - 其他 → 原始参数值（**借用**，避免每次求值深克隆大参数对象）
+fn resolve_param<'a>(key: &str, params: &'a impl ParamsAccess) -> Option<ResolvedParam<'a>> {
     if let Some(base) = key.strip_suffix(".size()") {
         match params.get_param(base) {
-            Some(Value::Array(a)) => Some(Value::Number(a.len().into())),
-            Some(Value::String(s)) => Some(Value::Number(s.chars().count().into())),
-            Some(Value::Object(o)) => Some(Value::Number(o.len().into())),
-            Some(Value::Null) | None => Some(Value::Number(0.into())),
-            Some(other) => Some(other.clone()),
+            Some(Value::Array(a)) => Some(ResolvedParam::Owned(Value::Number(a.len().into()))),
+            Some(Value::String(s)) => {
+                Some(ResolvedParam::Owned(Value::Number(s.chars().count().into())))
+            }
+            Some(Value::Object(o)) => Some(ResolvedParam::Owned(Value::Number(o.len().into()))),
+            Some(Value::Null) | None => Some(ResolvedParam::Owned(Value::Number(0.into()))),
+            Some(other) => Some(ResolvedParam::Borrowed(other)),
         }
     } else if let Some(base) = key.strip_suffix(".isEmpty()") {
         match params.get_param(base) {
-            Some(Value::Array(a)) => Some(Value::Bool(a.is_empty())),
-            Some(Value::String(s)) => Some(Value::Bool(s.is_empty())),
-            Some(Value::Object(o)) => Some(Value::Bool(o.is_empty())),
-            Some(Value::Null) | None => Some(Value::Bool(true)),
-            Some(_) => Some(Value::Bool(false)),
+            Some(Value::Array(a)) => Some(ResolvedParam::Owned(Value::Bool(a.is_empty()))),
+            Some(Value::String(s)) => Some(ResolvedParam::Owned(Value::Bool(s.is_empty()))),
+            Some(Value::Object(o)) => Some(ResolvedParam::Owned(Value::Bool(o.is_empty()))),
+            Some(Value::Null) | None => Some(ResolvedParam::Owned(Value::Bool(true))),
+            Some(_) => Some(ResolvedParam::Owned(Value::Bool(false))),
         }
     } else {
-        params.get_param(key).cloned()
+        params.get_param(key).map(ResolvedParam::Borrowed)
     }
 }
 
 /// 评估单个比较条件
 fn evaluate_single(kv: &KeyValue, params: &impl ParamsAccess) -> bool {
     match resolve_param(&kv.key, params) {
-        Some(value) => {
+        Some(resolved) => {
+            let value = resolved.as_value();
             // 布尔字面量判定辅助
             let value_bool = if kv.value.eq_ignore_ascii_case("true") {
                 Some(true)
@@ -162,12 +183,12 @@ fn evaluate_single(kv: &KeyValue, params: &impl ParamsAccess) -> bool {
                         // 参数存在且为 JSON null 时，"key == null" 才为 true（对齐 MyBatis OGNL）
                         return value.is_null();
                     } else if let Some(b) = value_bool {
-                        matches!(value, Value::Bool(x) if x == b)
+                        matches!(*value, Value::Bool(x) if x == b)
                     } else if kv.value.starts_with('\'') && kv.value.ends_with('\'') {
                         let str_val = kv.value.trim_matches('\'');
-                        matches!(value, Value::String(s) if s == str_val)
+                        matches!(*value, Value::String(ref s) if s == str_val)
                     } else if let Ok(num) = kv.value.parse::<i64>() {
-                        matches!(value, Value::Number(n) if n.as_i64() == Some(num))
+                        matches!(*value, Value::Number(ref n) if n.as_i64() == Some(num))
                     } else {
                         false
                     }
@@ -177,12 +198,12 @@ fn evaluate_single(kv: &KeyValue, params: &impl ParamsAccess) -> bool {
                         // 参数存在且为 JSON null 时，"key != null" 应为 false（对齐 MyBatis OGNL）
                         return !value.is_null();
                     } else if let Some(b) = value_bool {
-                        matches!(value, Value::Bool(x) if x != b)
+                        matches!(*value, Value::Bool(x) if x != b)
                     } else if kv.value.starts_with('\'') && kv.value.ends_with('\'') {
                         let str_val = kv.value.trim_matches('\'');
-                        matches!(value, Value::String(s) if s != str_val)
+                        matches!(*value, Value::String(ref s) if s != str_val)
                     } else if let Ok(num) = kv.value.parse::<i64>() {
-                        matches!(value, Value::Number(n) if n.as_i64() != Some(num))
+                        matches!(*value, Value::Number(ref n) if n.as_i64() != Some(num))
                     } else {
                         false // 类型不匹配时返回false，而非true
                     }

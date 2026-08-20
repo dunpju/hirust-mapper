@@ -11,7 +11,7 @@
 //! Session 是请求级对象（单线程顺序使用），`&mut self` 是惯用且正确的设计。
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Instant;
 
 use futures_util::StreamExt;
@@ -32,7 +32,8 @@ use crate::type_handler::TypeHandlerRegistry;
 /// SqlSession（请求级）
 pub struct SqlSession {
     environment: Environment,
-    mapper_registry: Arc<RwLock<MapperRegistry>>,
+    /// Mapper 注册表（内部自带 RwLock，无需外层再包一层锁）
+    mapper_registry: Arc<MapperRegistry>,
     type_alias_registry: Arc<TypeAliasRegistry>,
     type_handler_registry: Arc<TypeHandlerRegistry>,
     sql_log: Arc<SqlLogConfig>,
@@ -56,7 +57,7 @@ impl SqlSession {
     /// 由 SqlSessionFactory 调用的构造函数
     pub(crate) fn new(
         environment: Environment,
-        mapper_registry: Arc<RwLock<MapperRegistry>>,
+        mapper_registry: Arc<MapperRegistry>,
         type_alias_registry: Arc<TypeAliasRegistry>,
         type_handler_registry: Arc<TypeHandlerRegistry>,
         sql_log: Arc<SqlLogConfig>,
@@ -90,9 +91,9 @@ impl SqlSession {
         self.environment.pool()
     }
 
-    /// Mapper 注册表的只读锁
-    pub fn mapper_registry(&self) -> std::sync::RwLockReadGuard<'_, MapperRegistry> {
-        self.mapper_registry.read().expect("MapperRegistry 锁中毒")
+    /// Mapper 注册表引用（内部自带线程安全，写操作如 insert_mapper 也经 &self）
+    pub fn mapper_registry(&self) -> &MapperRegistry {
+        &self.mapper_registry
     }
 
     /// 类型别名注册表引用
@@ -157,17 +158,16 @@ impl SqlSession {
         }
     }
 
-    /// 查询语句关联的 ResultMap（若声明了 resultMap 且存在）
-    fn get_result_map(&self, namespace: &str, statement_id: &str) -> Result<Option<ResultMap>> {
-        let mapper = self.get_mapper(namespace)?;
+    /// 查询语句关联的 ResultMap（借用，不克隆——ResultMap 为启动后不可变的静态数据）
+    fn result_map_of<'a>(
+        mapper: &'a Mapper,
+        statement_id: &str,
+    ) -> Result<Option<&'a ResultMap>> {
         match mapper.statements.get(statement_id) {
-            Some(stmt) => {
-                if let Some(rm_id) = &stmt.result_map {
-                    Ok(mapper.result_maps.get(rm_id).cloned())
-                } else {
-                    Ok(None)
-                }
-            }
+            Some(stmt) => Ok(stmt
+                .result_map
+                .as_ref()
+                .and_then(|rm_id| mapper.result_maps.get(rm_id))),
             None => Err(hirust_mapper_core::MapperError::StatementNotFound {
                 id: statement_id.to_string(),
             }
@@ -193,11 +193,15 @@ impl SqlSession {
         statement_id: &str,
         params: &HashMap<String, Value>,
     ) -> Result<Option<T>> {
-        let result_map = self.get_result_map(namespace, statement_id)?;
-        let bound = self.build_bound_sql(namespace, statement_id, params)?;
+        // 单次注册表查找：同时取 ResultMap（借用）与生成 SQL，避免二次加锁
+        let mapper = self.get_mapper(namespace)?;
+        let result_map = Self::result_map_of(&mapper, statement_id)?;
+        let bound = mapper
+            .build_bound_sql(statement_id, params)
+            .map_err(MapperRuntimeError::from)?;
         let rows = self.fetch_rows(&bound).await?;
         match result_map {
-            Some(rm) => crate::handler::result_set::ResultSetHandler::map_row_with_result_map::<T>(rows, &rm),
+            Some(rm) => crate::handler::result_set::ResultSetHandler::map_row_with_result_map::<T>(rows, rm),
             None => match rows.len() {
                 0 => Ok(None),
                 1 => Ok(Some(crate::handler::result_set::ResultSetHandler::map_row(&rows[0])?)),
@@ -213,11 +217,15 @@ impl SqlSession {
         statement_id: &str,
         params: &HashMap<String, Value>,
     ) -> Result<Vec<T>> {
-        let result_map = self.get_result_map(namespace, statement_id)?;
-        let bound = self.build_bound_sql(namespace, statement_id, params)?;
+        // 单次注册表查找：同时取 ResultMap（借用）与生成 SQL，避免二次加锁
+        let mapper = self.get_mapper(namespace)?;
+        let result_map = Self::result_map_of(&mapper, statement_id)?;
+        let bound = mapper
+            .build_bound_sql(statement_id, params)
+            .map_err(MapperRuntimeError::from)?;
         let rows = self.fetch_rows(&bound).await?;
         match result_map {
-            Some(rm) => crate::handler::result_set::ResultSetHandler::map_rows_with_result_map::<T>(rows, &rm),
+            Some(rm) => crate::handler::result_set::ResultSetHandler::map_rows_with_result_map::<T>(rows, rm),
             None => crate::handler::result_set::ResultSetHandler::map_rows::<T>(rows),
         }
     }
