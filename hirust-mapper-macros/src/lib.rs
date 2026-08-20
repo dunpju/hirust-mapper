@@ -9,6 +9,12 @@
 //! - `#[dao]` + `#[mapper_query]` — 签名驱动的类型化 DAO：方法名→statement_id、
 //!   模块路径→namespace、形参名→SQL 参数键、返回类型→select/insert/...。
 
+// 本 crate 为 proc-macro（dylib）。Windows/MSVC 下 link.exe 生成导入库时向 stdout
+// 打印「Creating library … and object ….exp」属正常信息；rustc 的内置过滤器只匹配
+// 英文文案，非英文（如中文）本地化工具链的输出会漏过滤而被 `linker_messages`
+// lint 误报为警告。该信息无害，crate 级豁免。
+#![allow(linker_messages)]
+
 mod dao;
 mod derive_model;
 mod gen_mapper;

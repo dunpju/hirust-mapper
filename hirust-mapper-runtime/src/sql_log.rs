@@ -56,8 +56,8 @@ impl SqlLogConfig {
 ///
 /// 字符串值加单引号并转义内嵌引号；数字/布尔/NULL 原样输出；参数少于占位符时保留 `?`。
 ///
-/// XML 中多行书写的 SQL 其换行符（`\n` / `\r\n` / `\r`，单个或连续多个）会被折叠为
-/// 单个空格，保证日志单行输出。
+/// XML 中多行/缩进书写的 SQL，其连续空白（换行 `\n`/`\r\n`/`\r`、制表符、空格，
+/// 单个或连续多个）会被折叠为单个空格，保证日志单行且紧凑。
 ///
 /// 注意：按字节扫描 `?` 做替换，若 SQL 文本中存在字面 `?`（如字符串字面量内）会被误替换，
 /// 仅供日志可读性，不影响实际执行。
@@ -83,21 +83,24 @@ pub fn render_sql_for_log(bound: &BoundSql) -> String {
         last = idx + 1;
     }
     out.push_str(&sql[last..]);
-    collapse_newlines(&out)
+    collapse_whitespace(&out)
 }
 
-/// 将连续换行符（`\n` / `\r\n` / `\r`，单个或连续多个）折叠为单个空格。
+/// 将连续空白字符（换行/`\r`/制表符/空格，单个或连续多个）折叠为单个空格。
 ///
-/// 无换行时原样返回（仅一次拷贝）。也覆盖内联参数值中含换行的情况，
-/// 确保整条日志始终单行。
-fn collapse_newlines(s: &str) -> String {
-    if !s.contains(['\n', '\r']) {
+/// 无需折叠时（不含换行/制表且无连续空格）原样返回，仅一次拷贝。
+/// 也覆盖内联参数值中含空白的情况，确保整条日志始终单行。
+fn collapse_whitespace(s: &str) -> String {
+    // 快速路径：既无换行/制表，也无连续空格 → 原样返回
+    let needs = s.as_bytes().iter().any(|&b| matches!(b, b'\n' | b'\r' | b'\t'))
+        || s.contains("  ");
+    if !needs {
         return s.to_string();
     }
     let mut out = String::with_capacity(s.len());
     let mut in_run = false;
     for ch in s.chars() {
-        if ch == '\n' || ch == '\r' {
+        if ch.is_whitespace() {
             if !in_run {
                 out.push(' ');
                 in_run = true;
@@ -193,16 +196,22 @@ mod tests {
 
     #[test]
     fn test_render_collapses_multiline_xml_style_sql_with_params() {
-        // 贴近真实 XML 的多行动态 SQL + 参数内联，整条日志保持单行。
-        // 仅折叠换行符；续行的缩进空格原样保留（\n 后跟两空格 → 空格 + 两空格）。
+        // 贴近真实 XML 的多行 + 缩进 SQL：换行与缩进空格连续出现，整体折叠为单个空格
         let b = bound(
             "SELECT id, name FROM users\n  WHERE status = ?\n  AND id IN (?, ?)",
             vec![json!(1), json!(2), json!(3)],
         );
         assert_eq!(
             render_sql_for_log(&b),
-            "SELECT id, name FROM users   WHERE status = 1   AND id IN (2, 3)"
+            "SELECT id, name FROM users WHERE status = 1 AND id IN (2, 3)"
         );
+    }
+
+    #[test]
+    fn test_render_collapses_consecutive_spaces() {
+        // 连续多空格 → 单个空格（XML 缩进残留）
+        let b = bound("SELECT   id,\n                name\n         FROM   users", vec![]);
+        assert_eq!(render_sql_for_log(&b), "SELECT id, name FROM users");
     }
 
     #[test]
@@ -213,13 +222,17 @@ mod tests {
     }
 
     #[test]
-    fn test_collapse_newlines_fast_path_and_runs() {
-        // 无换行原样返回
-        assert_eq!(collapse_newlines("abc"), "abc");
-        // 首尾换行同样折叠为空格
-        assert_eq!(collapse_newlines("\nSELECT 1\n"), " SELECT 1 ");
+    fn test_collapse_whitespace_fast_path_and_runs() {
+        // 无需折叠时原样返回（仅单空格、无换行/制表）
+        assert_eq!(collapse_whitespace("SELECT id FROM t WHERE a = 1"), "SELECT id FROM t WHERE a = 1");
+        // 连续空格 / 空格+换行混合 → 单空格
+        assert_eq!(collapse_whitespace("a   b"), "a b");
+        assert_eq!(collapse_whitespace("a \n\t b"), "a b");
+        assert_eq!(collapse_whitespace("a\tb"), "a b");
+        // 首尾空白折叠为单个空格（保留，不去除）
+        assert_eq!(collapse_whitespace("\n  SELECT 1\n"), " SELECT 1 ");
         // 仅 \r
-        assert_eq!(collapse_newlines("a\rb"), "a b");
+        assert_eq!(collapse_whitespace("a\rb"), "a b");
     }
 
     #[test]
