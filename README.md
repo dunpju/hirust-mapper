@@ -287,6 +287,7 @@ HIRUST_MAPPER_SQL_LOG_SLOW_MS=200 \
 ```
 
 - 日志 target 固定为 `hirust_mapper::sql`，参数按 `?` 顺序内联（字符串加引号、`NULL`/布尔/数字原样）。
+- XML 中多行书写的 SQL，其换行符（单个或连续多个）在日志输出时折叠为单个空格，保证每条日志单行。
 - `sql_log_slow_threshold_ms > 0` 时只记录达到阈值的慢查询；`0` 记录全部。
 - 本 crate **只经 `log` facade 发射日志，不自带输出后端**——需应用初始化一个日志后端方能见到输出：
 

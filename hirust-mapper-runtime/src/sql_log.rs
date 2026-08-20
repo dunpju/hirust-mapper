@@ -56,6 +56,9 @@ impl SqlLogConfig {
 ///
 /// 字符串值加单引号并转义内嵌引号；数字/布尔/NULL 原样输出；参数少于占位符时保留 `?`。
 ///
+/// XML 中多行书写的 SQL 其换行符（`\n` / `\r\n` / `\r`，单个或连续多个）会被折叠为
+/// 单个空格，保证日志单行输出。
+///
 /// 注意：按字节扫描 `?` 做替换，若 SQL 文本中存在字面 `?`（如字符串字面量内）会被误替换，
 /// 仅供日志可读性，不影响实际执行。
 pub fn render_sql_for_log(bound: &BoundSql) -> String {
@@ -80,6 +83,30 @@ pub fn render_sql_for_log(bound: &BoundSql) -> String {
         last = idx + 1;
     }
     out.push_str(&sql[last..]);
+    collapse_newlines(&out)
+}
+
+/// 将连续换行符（`\n` / `\r\n` / `\r`，单个或连续多个）折叠为单个空格。
+///
+/// 无换行时原样返回（仅一次拷贝）。也覆盖内联参数值中含换行的情况，
+/// 确保整条日志始终单行。
+fn collapse_newlines(s: &str) -> String {
+    if !s.contains(['\n', '\r']) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut in_run = false;
+    for ch in s.chars() {
+        if ch == '\n' || ch == '\r' {
+            if !in_run {
+                out.push(' ');
+                in_run = true;
+            }
+        } else {
+            out.push(ch);
+            in_run = false;
+        }
+    }
     out
 }
 
@@ -141,6 +168,58 @@ mod tests {
     fn test_render_keeps_placeholder_when_params_short() {
         let b = bound("VALUES (?, ?, ?)", vec![json!(1)]);
         assert_eq!(render_sql_for_log(&b), "VALUES (1, ?, ?)");
+    }
+
+    #[test]
+    fn test_render_collapses_newlines() {
+        // XML 多行 SQL：单个换行 → 空格
+        let b = bound("SELECT id\nFROM users\nWHERE id = ?", vec![json!(7)]);
+        assert_eq!(render_sql_for_log(&b), "SELECT id FROM users WHERE id = 7");
+    }
+
+    #[test]
+    fn test_render_collapses_consecutive_newlines() {
+        // 连续多个换行 → 仍是单个空格
+        let b = bound("SELECT id\n\n\n\nFROM users", vec![]);
+        assert_eq!(render_sql_for_log(&b), "SELECT id FROM users");
+    }
+
+    #[test]
+    fn test_render_collapses_crlf_and_cr() {
+        // \r\n 与 \r 混合连续 → 单个空格
+        let b = bound("SELECT a\r\n\r\nFROM t\rWHERE x = ?", vec![json!(1)]);
+        assert_eq!(render_sql_for_log(&b), "SELECT a FROM t WHERE x = 1");
+    }
+
+    #[test]
+    fn test_render_collapses_multiline_xml_style_sql_with_params() {
+        // 贴近真实 XML 的多行动态 SQL + 参数内联，整条日志保持单行。
+        // 仅折叠换行符；续行的缩进空格原样保留（\n 后跟两空格 → 空格 + 两空格）。
+        let b = bound(
+            "SELECT id, name FROM users\n  WHERE status = ?\n  AND id IN (?, ?)",
+            vec![json!(1), json!(2), json!(3)],
+        );
+        assert_eq!(
+            render_sql_for_log(&b),
+            "SELECT id, name FROM users   WHERE status = 1   AND id IN (2, 3)"
+        );
+    }
+
+    #[test]
+    fn test_render_collapses_newline_in_param_value() {
+        // 参数值内含换行同样折叠，保证日志单行
+        let b = bound("INSERT INTO t (v) VALUES (?)", vec![json!("a\nb")]);
+        assert_eq!(render_sql_for_log(&b), "INSERT INTO t (v) VALUES ('a b')");
+    }
+
+    #[test]
+    fn test_collapse_newlines_fast_path_and_runs() {
+        // 无换行原样返回
+        assert_eq!(collapse_newlines("abc"), "abc");
+        // 首尾换行同样折叠为空格
+        assert_eq!(collapse_newlines("\nSELECT 1\n"), " SELECT 1 ");
+        // 仅 \r
+        assert_eq!(collapse_newlines("a\rb"), "a b");
     }
 
     #[test]
