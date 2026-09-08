@@ -18,7 +18,12 @@ fn get_attr(e: &BytesStart, name: &[u8], err_msg: &str) -> Result<String, Mapper
         .find(|a| a.as_ref().map(|a| a.key.as_ref() == name).unwrap_or(false))
         .ok_or_else(|| MapperError::ParseError { message: err_msg.to_string() })?
         .map_err(|e| MapperError::ParseError { message: e.to_string() })?;
-    Ok(std::str::from_utf8(&attr.value)?.to_string())
+    // 属性值必须实体解码（补丁④）：quick-xml 的 attr.value 是原始转义字节，
+    // 若 test="x &gt; 0" 保留字面 "&gt;"，条件正则（op 仅 [!=<>]+）匹配失败 → 恒 false，
+    // 导致所有数字比较条件静默失效。
+    attr.unescape_value()
+        .map(|s| s.to_string())
+        .map_err(|e| MapperError::ParseError { message: format!("属性 {name:?} 实体解码失败: {e}") })
 }
 
 /// 获取可选属性，空字符串视为 None
