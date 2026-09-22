@@ -12,6 +12,10 @@
 //!  Execute SQL: SELECT `examId`, `examName` FROM exam WHERE (`examId` IN (69902) AND `isDelete` = 0)
 //! ```
 //!
+//! 「Execute SQL」行在输出到终端（stdout/stderr 任一为 TTY）时以红褐色 ANSI
+//! 颜色渲染，便于在日志流中快速定位；重定向到文件等非终端场景自动去掉颜色码，
+//! 避免转义序列污染日志文件。
+//!
 //! ## 消费方
 //!
 //! 本 crate 仅通过 `log` facade 发射日志，**不自带输出后端**。要看到输出，
@@ -29,6 +33,11 @@ use serde_json::Value;
 
 /// 日志 target（便于用 `RUST_LOG=hirust_mapper::sql=info` 精确过滤）
 pub const LOG_TARGET: &str = "hirust_mapper::sql";
+
+/// SQL 行前景色：红褐色（ANSI 256 色 #D75F00）
+const SQL_COLOR: &str = "\x1b[38;5;166m";
+/// ANSI 颜色复位码
+const COLOR_RESET: &str = "\x1b[0m";
 
 /// SQL 日志配置（从 `[settings]` 解析）
 #[derive(Debug, Clone, Default)]
@@ -116,17 +125,36 @@ fn collapse_whitespace(s: &str) -> String {
 /// 若配置启用且达到阈值，记录一条 SQL 执行日志（耗时 + 可读 SQL）。
 ///
 /// 成功与失败路径均会记录（耗时本身有诊断价值）。
+/// 输出到终端时「Execute SQL」行以红褐色渲染（见 [`render_execute_line`]）。
 pub fn log_execution(config: &SqlLogConfig, bound: &BoundSql, elapsed: Duration) {
     if !config.should_log(elapsed) {
         return;
     }
     let sql = render_sql_for_log(bound);
+    let execute_line = render_execute_line(&sql, output_supports_color());
     log::info!(
         target: LOG_TARGET,
-        "Consume Time: {} ms\n Execute SQL: {}",
+        "Consume Time: {} ms\n {}",
         elapsed.as_millis(),
-        sql
+        execute_line
     );
+}
+
+/// 渲染日志第二行「Execute SQL: ...」；`colorize` 为真时整体加红褐色 ANSI 颜色。
+fn render_execute_line(sql: &str, colorize: bool) -> String {
+    if colorize {
+        format!("{SQL_COLOR}Execute SQL: {sql}{COLOR_RESET}")
+    } else {
+        format!("Execute SQL: {sql}")
+    }
+}
+
+/// 输出是否为终端：日志后端可能写 stdout（如 `tracing_subscriber` 默认）或
+/// stderr（如 `env_logger` 默认），任一为 TTY 即视为需要颜色。
+/// 重定向到文件/管道时不附加颜色码，避免转义序列落入日志文件。
+fn output_supports_color() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal() || std::io::stderr().is_terminal()
 }
 
 #[cfg(test)]
@@ -233,6 +261,23 @@ mod tests {
         assert_eq!(collapse_whitespace("\n  SELECT 1\n"), " SELECT 1 ");
         // 仅 \r
         assert_eq!(collapse_whitespace("a\rb"), "a b");
+    }
+
+    #[test]
+    fn test_render_execute_line_colored() {
+        // 着色：红褐色前景 + 复位码包裹整行（含 Execute SQL 标签）
+        let line = render_execute_line("SELECT 1", true);
+        assert_eq!(line, format!("{SQL_COLOR}Execute SQL: SELECT 1{COLOR_RESET}"));
+        assert!(line.starts_with("\x1b[38;5;166m"));
+        assert!(line.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn test_render_execute_line_plain() {
+        // 不着色：无任何 ANSI 转义序列
+        let line = render_execute_line("SELECT 1", false);
+        assert_eq!(line, "Execute SQL: SELECT 1");
+        assert!(!line.contains('\x1b'));
     }
 
     #[test]
