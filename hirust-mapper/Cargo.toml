@@ -3,12 +3,16 @@ name = "hirust-mapper"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "../README.md"
 description = "MyBatis 风格的 Rust ORM 框架（门面 crate）"
+keywords = ["mybatis", "orm", "sql", "xml", "mapper"]
+categories = ["database-implementations"]
 
 [dependencies]
-hirust-mapper-core = { path = "../hirust-mapper-core" }
-hirust-mapper-runtime = { path = "../hirust-mapper-runtime", optional = true }
-hirust-mapper-macros = { path = "../hirust-mapper-macros", optional = true }
+hirust-mapper-core = { path = "../hirust-mapper-core", version = "0.2" }
+hirust-mapper-runtime = { path = "../hirust-mapper-runtime", version = "0.2", optional = true }
+hirust-mapper-macros = { path = "../hirust-mapper-macros", version = "0.2", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

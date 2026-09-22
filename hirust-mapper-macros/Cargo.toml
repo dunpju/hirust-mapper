@@ -3,19 +3,23 @@ name = "hirust-mapper-macros"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "../README.md"
 description = "hirust-mapper 编译时类型安全 proc_macro"
+keywords = ["proc-macro", "mybatis", "orm", "dao", "codegen"]
+categories = ["development-tools::procedural-macro-helpers"]
 
 [lib]
 proc-macro = true
 
 [dependencies]
-hirust-mapper-core = { path = "../hirust-mapper-core" }
+hirust-mapper-core = { path = "../hirust-mapper-core", version = "0.2" }
 quote = { workspace = true }
 proc-macro2 = { workspace = true }
 syn = { workspace = true }
 
 [dev-dependencies]
-hirust-mapper-runtime = { path = "../hirust-mapper-runtime" }
+hirust-mapper-runtime = { path = "../hirust-mapper-runtime", version = "0.2" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -11,6 +11,7 @@ members = [
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/dunpju/hirust-mapper"
 
 [workspace.dependencies]
 # 核心解析依赖

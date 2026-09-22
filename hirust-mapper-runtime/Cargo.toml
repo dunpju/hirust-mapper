@@ -3,10 +3,14 @@ name = "hirust-mapper-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "../README.md"
 description = "hirust-mapper ORM 运行时：session、executor、配置、热重载"
+keywords = ["orm", "sqlx", "mybatis", "async", "sqlite"]
+categories = ["database-implementations", "asynchronous"]
 
 [dependencies]
-hirust-mapper-core = { path = "../hirust-mapper-core" }
+hirust-mapper-core = { path = "../hirust-mapper-core", version = "0.2" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
